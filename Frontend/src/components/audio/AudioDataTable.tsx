@@ -438,7 +438,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 min-h-0 overflow-auto scrollbar-thin">
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (

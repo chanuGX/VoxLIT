@@ -14,10 +14,13 @@ import { useEmbedding } from "../../contexts/EmbeddingContext";
 import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle } from "lucide-react";
 import { getFeatureExplanation } from "@/lib/audioFeatures";
 import { API_BASE } from "@/lib/api";
+import { BatchAnalysisKind } from "@/tasks/types";
 
 interface EmbeddingPanelProps {
   model?: string;
   dataset?: string;
+  /** Which batch-analysis mode this task supports (from the task registry). */
+  batchAnalysis?: BatchAnalysisKind;
   availableFiles?: string[];
   selectedFile?: string | null;
   onFileSelect?: (filename: string) => void;
@@ -111,7 +114,7 @@ interface WhisperAnalysis {
   };
 }
 
-export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", availableFiles = [], selectedFile, onFileSelect }: EmbeddingPanelProps) => {
+export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", batchAnalysis = null, availableFiles = [], selectedFile, onFileSelect }: EmbeddingPanelProps) => {
   const [reductionMethod, setReductionMethod] = useState("pca");
   const [is3D, setIs3D] = useState(false);
   const [selectionMode, setSelectionMode] = useState<'box' | 'lasso'>('box');
@@ -126,25 +129,25 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const { embeddingData, isLoading, error, fetchEmbeddings, clearEmbeddings } = useEmbedding();
 
-  // Get available analysis types based on model
+  // Get available analysis types based on the task's batch-analysis capability
   const getAvailableAnalysisTypes = () => {
-    if (model === 'wav2vec2') {
+    if (batchAnalysis === 'emotion-distribution') {
       return ['predictions', 'audio-features'] as const;
-    } else if (model?.includes('whisper')) {
+    } else if (batchAnalysis === 'transcript-terms') {
       return ['common-terms', 'audio-features'] as const;
     }
-    return ['audio-features'] as const; // Default for other models
+    return ['audio-features'] as const; // Default for tasks without batch analysis
   };
 
-  // Update analysis type when model changes to ensure it's valid
+  // Update analysis type when the batch-analysis mode changes to ensure it's valid
   useEffect(() => {
     const availableTypes = getAvailableAnalysisTypes();
     if (!availableTypes.includes(analysisType as any)) {
-      // Set to first available type if current type is not valid for this model
+      // Set to first available type if current type is not valid for this task
       setAnalysisType(availableTypes[0]);
       clearAnalysisResults();
     }
-  }, [model]);
+  }, [batchAnalysis]);
 
   // Auto-fetch embeddings when model, dataset, or reduction method changes
   useEffect(() => {
@@ -411,7 +414,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
           </h3>
         </div>
       
-      <div className="flex-1 p-3 bg-panel-background overflow-auto">
+      <div className="flex-1 min-h-0 p-3 bg-panel-background overflow-y-auto scrollbar-thin">
         <div className="space-y-3">
           {/* Controls Section */}
           <div className="flex-shrink-0 space-y-2.5">
@@ -511,10 +514,10 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {model === 'wav2vec2' && (
+                {batchAnalysis === 'emotion-distribution' && (
                 <SelectItem value="predictions">Predictions</SelectItem>
                 )}
-                {model?.includes('whisper') && (
+                {batchAnalysis === 'transcript-terms' && (
                 <SelectItem value="common-terms">Common Terms</SelectItem>
                 )}
                 <SelectItem value="audio-features">Audio Features</SelectItem>

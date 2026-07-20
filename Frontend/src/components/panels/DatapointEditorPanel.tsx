@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, ReactNode } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -6,40 +6,10 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { AudioPlayer } from "../audio/AudioPlayer";
 import { WaveformViewer } from "../audio/WaveformViewer";
-import { PredictionDisplay } from "../predictions/PredictionDisplay";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
-
-interface UploadedFile {
-  file_id: string;
-  filename: string;
-  file_path: string;
-  message: string;
-  size?: number;
-  duration?: number;
-  sample_rate?: number;
-}
-
-interface Wav2Vec2Prediction {
-  predicted_emotion: string;
-  probabilities: Record<string, number>;
-  confidence: number;
-  ground_truth_emotion?: string;
-}
-
-interface WhisperPrediction {
-  predicted_transcript: string;
-  ground_truth: string;
-  accuracy_percentage: number | null;
-  word_error_rate: number | null;
-  character_error_rate: number | null;
-  levenshtein_distance: number | null;
-  exact_match: number | null;
-  character_similarity: number | null;
-  word_count_predicted: number;
-  word_count_truth: number;
-}
+import { UploadedFile } from '@/tasks/types';
 
 interface PerturbationResult {
   perturbed_file: string;
@@ -63,29 +33,22 @@ interface DatapointEditorPanelProps {
   originalDataset?: string; // Original dataset selection from toolbar
   perturbationResult?: PerturbationResult | null;
   predictionMap?: Record<string, string>;
-  model?: string;
-  wav2vecPrediction?: Wav2Vec2Prediction | null;
-  whisperPrediction?: WhisperPrediction | null;
-  perturbedPredictions?: Wav2Vec2Prediction | WhisperPrediction | null;
-  isLoadingPredictions?: boolean;
-  isLoadingPerturbed?: boolean;
-  predictionError?: string | null;
+  /**
+   * Task-specific results card (from the registry's TASK_SLOTS), rendered
+   * between Sample Info and Audio Playback. Receives the current
+   * original/perturbed toggle state. Omitted for placeholder tasks.
+   */
+  renderPredictionResults?: (showPerturbed: boolean) => ReactNode;
 }
 
-export const DatapointEditorPanel = ({ 
-  selectedFile, 
+export const DatapointEditorPanel = ({
+  selectedFile,
   selectedEmbeddingFile,
-  dataset = "custom", 
+  dataset = "custom",
   originalDataset,
-  perturbationResult, 
+  perturbationResult,
   predictionMap,
-  model,
-  wav2vecPrediction,
-  whisperPrediction,
-  perturbedPredictions,
-  isLoadingPredictions,
-  isLoadingPerturbed,
-  predictionError
+  renderPredictionResults
 }: DatapointEditorPanelProps) => {
   const [selectedLabel, setSelectedLabel] = useState<string>("neutral");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -205,7 +168,7 @@ export const DatapointEditorPanel = ({
           </h3>
         </div>
 
-      <div className="flex-1 p-3 overflow-auto space-y-3">
+      <div className="flex-1 min-h-0 p-3 overflow-y-auto space-y-3 scrollbar-thin">
         {/* Sample Info - Top */}
         <Card>
           <CardHeader className="bg-panel-header">
@@ -324,19 +287,8 @@ export const DatapointEditorPanel = ({
           </CardContent>
         </Card>
 
-        {/* Predictions Section - Middle */}
-        <PredictionDisplay
-          selectedFile={selectedFile}
-          selectedEmbeddingFile={selectedEmbeddingFile}
-          model={model}
-          wav2vecPrediction={wav2vecPrediction}
-          whisperPrediction={whisperPrediction}
-          perturbedPredictions={perturbedPredictions}
-          isLoading={isLoadingPredictions}
-          isLoadingPerturbed={isLoadingPerturbed}
-          error={predictionError}
-          showPerturbed={showPerturbed}
-        />
+        {/* Predictions Section - Middle (task-specific, from registry slot) */}
+        {renderPredictionResults?.(showPerturbed)}
 
         {/* Audio Player & Waveform - Bottom */}
         <Card>
@@ -372,11 +324,17 @@ export const DatapointEditorPanel = ({
               onProgress={(time, dur) => {
                 setCurrentTime(time);
                 setDuration(dur);
-                
+
                 // Update duration in metadata if not already set
                 if (!audioMetadata.duration && dur > 0) {
                   setAudioMetadata(prev => ({ ...prev, duration: dur }));
                 }
+              }}
+              onFinish={() => {
+                // Reset player when the clip ends: play icon + slider/cursor to start
+                setIsPlaying(false);
+                setCurrentTime(0);
+                wavesurferRef.current?.seekTo(0);
               }}
             />
             <AudioPlayer 

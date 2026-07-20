@@ -7,9 +7,11 @@ interface WaveformViewerProps {
   isPlaying?: boolean;
   onReady?: (wavesurfer: WaveSurfer) => void;
   onProgress?: (currentTime: number, duration: number) => void;
+  /** Called when playback reaches the end of the clip. */
+  onFinish?: () => void;
 }
 
-export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: WaveformViewerProps) => {
+export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFinish }: WaveformViewerProps) => {
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -60,6 +62,12 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress }: Wav
     wavesurfer.on('audioprocess', (currentTime) => {
       if (onProgress) {
         onProgress(currentTime, wavesurfer.getDuration());
+      }
+    });
+
+    wavesurfer.on('finish', () => {
+      if (onFinish) {
+        onFinish();
       }
     });
 

@@ -19,6 +19,8 @@ Interpreting how deep learning models make decisions is crucial, especially in h
 
 VoxLIT extends the interpretability paradigm to audio models, providing researchers and developers with tools to analyze and debug speech models with greater transparency. Through interactive visualizations, attention mechanisms, and perturbation analyses, you can gain deeper insights into how your audio models make decisions.
 
+VoxLIT is organized as a homepage plus **five task workbenches** (Speech Transcription, Emotion Recognition, and three tasks in development). Tasks, their models, and their datasets are configured centrally — see [STRUCTURE.md](STRUCTURE.md) for the repository layout, the task registry, and how to add a new task, model, or dataset.
+
 ## Features
 
 - **Audio Data Management**: Upload and manage audio datasets with metadata

@@ -1,0 +1,21 @@
+# VoxLIT code ownership — keeps the three task workstreams independent.
+# Replace @member1/@member2/@member3 with real GitHub usernames.
+
+# Per-member task areas (work here without cross-review)
+/Frontend/src/features/task-a/   @member1
+/Backend/app/tasks/task_a/       @member1
+/Frontend/src/features/task-b/   @member2
+/Backend/app/tasks/task_b/       @member2
+/Frontend/src/features/task-c/   @member3
+/Backend/app/tasks/task_c/       @member3
+
+# The central registries — review together (small, frequent one-line edits)
+/Frontend/src/tasks/             @member1 @member2 @member3
+/Backend/app/tasks/registry.py   @member1 @member2 @member3
+/Backend/app/tasks/__init__.py   @member1 @member2 @member3
+
+# Shared/frozen code — changes need team review
+/Frontend/src/components/        @member1 @member2 @member3
+/Backend/app/services/           @member1 @member2 @member3
+/Backend/app/api/                @member1 @member2 @member3
+/Backend/app/main.py             @member1 @member2 @member3

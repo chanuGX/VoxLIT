@@ -187,7 +187,42 @@ All colors MUST be HSL.
   }
 }
 
+@keyframes eq-bounce {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
 @layer utilities {
+  /* Animated equalizer bars for the homepage hero */
+  .eq-bar {
+    animation: eq-bounce 1.2s ease-in-out infinite;
+    transform-origin: bottom;
+  }
+
+  /* Thin, consistent scrollbar for the workbench panels */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 4px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--muted-foreground) / 0.5);
+  }
+
   .panel-background {
     background-color: hsl(var(--panel-background));
   }

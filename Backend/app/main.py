@@ -5,6 +5,7 @@ from .core.session import SessionMiddleware
 
 from .api.routes import session as session_routes, results as results_routes, inferences as inferences_routes, upload as upload_routes, health as health_routes
 from .api.routes import datasets as datasets_routes, saliency as saliency_routes, perturbations as perturbations_routes, dataset_management as dataset_management_routes, debug as debug_routes
+from .tasks import ACTIVE_TASK_MODULES, router as tasks_router
 
 app = FastAPI(title="LIT for Voice – API")
 
@@ -34,6 +35,18 @@ app.include_router(results_routes.router, tags=["Results"])
 app.include_router(inferences_routes.router, tags=["Inferences"])
 app.include_router(upload_routes.router, tags=["Upload"])
 app.include_router(dataset_management_routes.router, prefix="/upload", tags=["Dataset Management"])
+
+# Task registry + per-task routers (app/tasks/). Must be registered BEFORE the
+# datasets router, whose catch-all /{dataset}/... paths would shadow /tasks/...
+app.include_router(tasks_router, tags=["Tasks"])
+for task_module in ACTIVE_TASK_MODULES:
+    if getattr(task_module, "router", None) is not None:
+        app.include_router(
+            task_module.router,
+            prefix=f"/tasks/{task_module.TASK_INFO['id']}",
+            tags=[task_module.TASK_INFO["name"]],
+        )
+
 app.include_router(datasets_routes.router, tags=["Datasets"])
 app.include_router(saliency_routes.router, tags=["Saliency"])
 app.include_router(perturbations_routes.router, tags=["Perturbations"])

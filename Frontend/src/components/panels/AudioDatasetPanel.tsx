@@ -9,6 +9,7 @@ import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
+import { BUILTIN_DATASET_IDS } from '@/tasks/registry';
 
 interface UploadedFile {
   file_id: string;
@@ -377,7 +378,7 @@ export const AudioDatasetPanel = ({
   // Cleanup on unmount or when dataset changes
   // Reload function to refresh dataset metadata
   const handleReloadDataset = useCallback(async () => {
-    const allowed = ["common-voice", "ravdess"];
+    const allowed = BUILTIN_DATASET_IDS;
     const datasetToUse = originalDataset || dataset;
     if (!allowed.includes(datasetToUse)) {
       setDatasetMetadata([]);
@@ -432,7 +433,7 @@ export const AudioDatasetPanel = ({
     }
     
     // Handle both global datasets and custom datasets
-    const allowed = ["common-voice", "ravdess"];
+    const allowed = BUILTIN_DATASET_IDS;
     const isCustomDataset = datasetToUse.startsWith('custom:');
     
     if (!allowed.includes(datasetToUse) && !isCustomDataset) {
@@ -621,7 +622,7 @@ export const AudioDatasetPanel = ({
         </div>
       </div>
       
-      <div className="flex-1 overflow-hidden px-3 pb-3">
+      <div className="flex-1 min-h-0 overflow-hidden px-3 pb-3">
         <Card className="h-full rounded-lg">
           <CardContent className="p-0 h-full">
             <AudioDataTable 

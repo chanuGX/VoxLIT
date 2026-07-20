@@ -1,55 +1,42 @@
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { Toolbar } from "./Toolbar";
+import { ExplainabilityPanel } from "./ExplainabilityPanel";
+import { PlaceholderExplainability } from "./PlaceholderExplainability";
 import { EmbeddingPanel } from "../panels/EmbeddingPanel";
 import { AudioDatasetPanel } from "../panels/AudioDatasetPanel";
 import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
-import { PredictionPanel } from "../panels/PredictionPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { API_BASE } from '@/lib/api';
+import {
+  TaskDefinition,
+  UploadedFile,
+  Wav2Vec2Prediction,
+  WhisperPrediction,
+} from '@/tasks/types';
+import { TASK_SLOTS, getModelLabel } from '@/tasks/registry';
 
-interface UploadedFile {
-  file_id: string;
-  filename: string;
-  file_path: string;
-  message: string;
-  size?: number;
-  duration?: number;
-  sample_rate?: number;
-  prediction?: string;
+interface TaskWorkbenchProps {
+  task: TaskDefinition;
 }
 
-interface Wav2Vec2Prediction {
-  predicted_emotion: string;
-  probabilities: Record<string, number>;
-  confidence: number;
-  ground_truth_emotion?: string;
-}
-
-interface WhisperPrediction {
-  predicted_transcript: string;
-  ground_truth: string;
-  accuracy_percentage: number | null;
-  word_error_rate: number | null;
-  character_error_rate: number | null;
-  levenshtein_distance: number | null;
-  exact_match: number | null;
-  character_similarity: number | null;
-  word_count_predicted: number;
-  word_count_truth: number;
-}
-
-export const MainLayout = () => {
+/**
+ * The shared three-column workbench used by every task page:
+ * left = Audio Embeddings, center = task explainability + dataset table,
+ * right = Datapoint Editor. Task-specific behavior (models, datasets,
+ * capabilities, results card) comes entirely from the task registry.
+ */
+export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [apiData, setApiData] = useState<unknown>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<UploadedFile | null>(null);
-  const [model, setModel] = useState("whisper-base");
-  const [dataset, setDataset] = useState("common-voice");
+  const [model, setModel] = useState(task.defaultModel ?? "");
+  const [dataset, setDataset] = useState(task.defaultDataset ?? "");
   const [batchInferenceStatus, setBatchInferenceStatus] = useState<'idle' | 'running' | 'done'>('idle');
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedEmbeddingFile, setSelectedEmbeddingFile] = useState<string | null>(null);
   const [perturbationResult, setPerturbationResult] = useState<any>(null);
-  
+
   // Prediction state
   const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
   const [whisperPrediction, setWhisperPrediction] = useState<WhisperPrediction | null>(null);
@@ -61,6 +48,8 @@ export const MainLayout = () => {
   // Refs to track ongoing requests and prevent duplicates
   const wav2vecRequestRef = useRef<AbortController | null>(null);
   const whisperRequestRef = useRef<AbortController | null>(null);
+
+  const { resultKind } = task.capabilities;
 
   // Clear perturbation result and predictions when selected file changes
   useEffect(() => {
@@ -74,7 +63,7 @@ export const MainLayout = () => {
   // Fetch perturbed predictions when perturbation result is available
   useEffect(() => {
     const fetchPerturbedPredictions = async () => {
-      if (!perturbationResult?.success || !model) {
+      if (!perturbationResult?.success || !model || !resultKind) {
         setPerturbedPredictions(null);
         return;
       }
@@ -88,14 +77,14 @@ export const MainLayout = () => {
         };
 
         let endpoint: string;
-        if (model === "wav2vec2") {
+        if (resultKind === "classification") {
           endpoint = `${API_BASE}/inferences/wav2vec2-detailed`;
           requestBody.include_attention = false; // Disable attention for better performance
-        } else if (model?.includes("whisper")) {
+        } else if (resultKind === "transcription") {
           endpoint = `${API_BASE}/inferences/whisper-accuracy`;
           requestBody.model = model;
         } else {
-          return; // Unsupported model
+          return; // Unsupported result kind
         }
 
         const response = await fetch(endpoint, {
@@ -123,12 +112,12 @@ export const MainLayout = () => {
     };
 
     fetchPerturbedPredictions();
-  }, [perturbationResult, model]);
+  }, [perturbationResult, model, resultKind]);
 
-  // Fetch wav2vec prediction when model is wav2vec2 and file is selected
+  // Fetch classification prediction (wav2vec2) when the task uses it and a file is selected
   useEffect(() => {
     const fetchWav2vecPrediction = async () => {
-      if (model !== "wav2vec2" || (!selectedFile && !selectedEmbeddingFile)) {
+      if (resultKind !== "classification" || (!selectedFile && !selectedEmbeddingFile)) {
         setWav2vecPrediction(null);
         setPredictionError(null);
         setIsLoadingPredictions(false);
@@ -149,17 +138,17 @@ export const MainLayout = () => {
 
       try {
         let requestBody: any = {};
-        
+
         if (selectedFile) {
           // Check if this is an uploaded file - more precise detection
           const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
+            selectedFile.file_path.includes('uploads/') ||
             selectedFile.file_path.startsWith('uploads/') ||
             selectedFile.message === "Perturbed file" ||
             selectedFile.message === "File uploaded successfully" ||
             selectedFile.message === "File uploaded and processed successfully"
           ) && !selectedFile.message.includes("Selected from");
-          
+
           if (isUploadedFile) {
             // This is an uploaded file, use file_path
             requestBody.file_path = selectedFile.file_path;
@@ -193,19 +182,19 @@ export const MainLayout = () => {
 
         const prediction = await response.json();
         setWav2vecPrediction(prediction);
-        
+
         // Update predictionMap for uploaded files
         if (selectedFile && prediction) {
           const isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
+            selectedFile.file_path.includes('uploads/') ||
             selectedFile.file_path.startsWith('uploads/') ||
             selectedFile.message === "Perturbed file" ||
             selectedFile.message === "File uploaded successfully" ||
             selectedFile.message === "File uploaded and processed successfully"
           ) && selectedFile.message !== "Selected from embeddings" && selectedFile.message !== "Selected from dataset";
-          
+
           if (isUploadedFile) {
-            const predictionText = typeof prediction === 'string' ? prediction : 
+            const predictionText = typeof prediction === 'string' ? prediction :
               prediction?.predicted_emotion || prediction?.prediction || prediction?.emotion || JSON.stringify(prediction);
             handlePredictionUpdate(selectedFile.file_id, predictionText);
           }
@@ -213,7 +202,7 @@ export const MainLayout = () => {
       } catch (err) {
         // Ignore abort errors
         if (err.name === 'AbortError') return;
-        
+
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
         setPredictionError(errorMessage);
         console.error("Error fetching wav2vec2 prediction:", err);
@@ -227,7 +216,7 @@ export const MainLayout = () => {
     };
 
     fetchWav2vecPrediction();
-    
+
     // Cleanup function
     return () => {
       if (wav2vecRequestRef.current) {
@@ -235,12 +224,12 @@ export const MainLayout = () => {
         wav2vecRequestRef.current = null;
       }
     };
-  }, [selectedFile, selectedEmbeddingFile, model, dataset]);
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, resultKind]);
 
-  // Fetch whisper prediction when model includes whisper and file is selected
+  // Fetch transcription prediction (whisper) when the task uses it and a file is selected
   useEffect(() => {
     const fetchWhisperPrediction = async () => {
-      if (!model?.includes("whisper") || (!selectedFile && !selectedEmbeddingFile)) {
+      if (resultKind !== "transcription" || (!selectedFile && !selectedEmbeddingFile)) {
         setWhisperPrediction(null);
         setPredictionError(null);
         setIsLoadingPredictions(false);
@@ -263,19 +252,19 @@ export const MainLayout = () => {
         let requestBody: any = {
           model: model
         };
-        
+
         let isUploadedFile = false;
-        
+
         if (selectedFile) {
           // Check if this is an uploaded file - more precise detection
           isUploadedFile = selectedFile.file_path && (
-            selectedFile.file_path.includes('uploads/') || 
+            selectedFile.file_path.includes('uploads/') ||
             selectedFile.file_path.startsWith('uploads/') ||
             selectedFile.message === "Perturbed file" ||
             selectedFile.message === "File uploaded successfully" ||
             selectedFile.message === "File uploaded and processed successfully"
           ) && !selectedFile.message.includes("Selected from");
-          
+
           if (isUploadedFile) {
             // This is an uploaded file, use file_path
             requestBody.file_path = selectedFile.file_path;
@@ -294,7 +283,7 @@ export const MainLayout = () => {
         // Choose the correct endpoint based on file type
         let endpoint: string;
         const isCustomDataset = dataset?.startsWith('custom:');
-        
+
         if (isUploadedFile || isCustomDataset) {
           // For uploaded files or custom datasets, use basic inference endpoint (no ground truth available)
           endpoint = `${API_BASE}/inferences/run`;
@@ -317,12 +306,12 @@ export const MainLayout = () => {
         }
 
         const prediction = await response.json();
-        
-        let whisperPrediction: WhisperPrediction;
-        
+
+        let whisperResult: WhisperPrediction;
+
         if (isUploadedFile || isCustomDataset) {
           // For uploaded files or custom datasets, convert basic prediction to expected format
-          whisperPrediction = {
+          whisperResult = {
             predicted_transcript: typeof prediction === 'string' ? prediction : prediction?.text || JSON.stringify(prediction),
             ground_truth: "",
             accuracy_percentage: null,
@@ -336,7 +325,7 @@ export const MainLayout = () => {
           };
         } else {
           // For regular dataset files, the accuracy endpoint returns all the metrics
-          whisperPrediction = {
+          whisperResult = {
             predicted_transcript: prediction.predicted_transcript || "",
             ground_truth: prediction.ground_truth || "",
             accuracy_percentage: prediction.accuracy_percentage !== null ? prediction.accuracy_percentage : null,
@@ -349,12 +338,12 @@ export const MainLayout = () => {
             word_count_truth: prediction.word_count_truth || 0
           };
         }
-        
-        setWhisperPrediction(whisperPrediction);
-        
+
+        setWhisperPrediction(whisperResult);
+
         // Update predictionMap for uploaded files and custom datasets
         if (selectedFile && (isUploadedFile || isCustomDataset)) {
-          handlePredictionUpdate(selectedFile.file_id, whisperPrediction.predicted_transcript);
+          handlePredictionUpdate(selectedFile.file_id, whisperResult.predicted_transcript);
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
@@ -370,7 +359,7 @@ export const MainLayout = () => {
     };
 
     fetchWhisperPrediction();
-    
+
     // Cleanup function
     return () => {
       if (whisperRequestRef.current) {
@@ -378,8 +367,8 @@ export const MainLayout = () => {
         whisperRequestRef.current = null;
       }
     };
-  }, [selectedFile, selectedEmbeddingFile, model, dataset]);
-  
+  }, [selectedFile, selectedEmbeddingFile, model, dataset, resultKind]);
+
   // Determine effective dataset based on uploaded files and custom datasets
   const effectiveDataset = (() => {
     // If a custom dataset is selected (starts with custom:), use it as-is
@@ -420,7 +409,7 @@ export const MainLayout = () => {
 
   const handleEmbeddingSelection = (filename: string) => {
     setSelectedEmbeddingFile(filename);
-    
+
     // Try to find and select corresponding file in audio dataset
     // First check uploaded files
     const matchingUploadedFile = uploadedFiles.find(f => f.filename === filename);
@@ -428,7 +417,7 @@ export const MainLayout = () => {
       setSelectedFile(matchingUploadedFile);
       return;
     }
-    
+
     // For dataset files, create a file-like object for the UI
     // The AudioDatasetPanel should handle highlighting the corresponding row
     const fileLike: UploadedFile = {
@@ -442,7 +431,7 @@ export const MainLayout = () => {
 
   const handlePerturbationComplete = (result: any) => {
     setPerturbationResult(result);
-    
+
     // Clear any existing perturbed predictions since we have a new perturbation
     setPerturbedPredictions(null);
   };
@@ -453,8 +442,8 @@ export const MainLayout = () => {
       setUploadedFiles(prevFiles => {
         const existingFile = prevFiles.find(f => f.file_id === file.file_id);
         if (existingFile) {
-          return prevFiles.map(f => 
-            f.file_id === file.file_id 
+          return prevFiles.map(f =>
+            f.file_id === file.file_id
               ? { ...f, prediction: prediction }
               : f
           );
@@ -462,14 +451,14 @@ export const MainLayout = () => {
           return [...prevFiles, { ...file, prediction: prediction }];
         }
       });
-      
+
       // Update predictionMap for perturbed file
       setPredictionMap(prev => {
         const updated = { ...prev, [file.filename]: prediction };
         return updated;
       });
     }
-    
+
     // Update selected file if it's the same file
     if (selectedFile && selectedFile.file_id === file.file_id) {
       setSelectedFile(prev => prev ? { ...prev, prediction: prediction } : null);
@@ -493,10 +482,10 @@ export const MainLayout = () => {
   const handleBatchInference = async (selectedModel: string, selectedDataset: string) => {
     // Don't run batch inference for legacy "custom" (uploaded files only)
     if (selectedDataset === 'custom') return;
-    
+
     // Clear predictions when dataset/model changes to avoid showing old predictions
     setPredictionMap({});
-    
+
     setBatchInferenceStatus('running');
     try {
       // This will be implemented by AudioDatasetPanel to run inference on all files
@@ -507,17 +496,38 @@ export const MainLayout = () => {
       setBatchInferenceStatus('idle');
     }
   };
+
+  // Per-task results card for the Datapoint Editor (from the registry slots).
+  // Placeholder tasks have no slot component and render no results card.
+  const PredictionResults = TASK_SLOTS[task.id].PredictionResults;
+  const renderPredictionResults = PredictionResults
+    ? (showPerturbed: boolean) => (
+        <PredictionResults
+          selectedFile={selectedFile}
+          selectedEmbeddingFile={selectedEmbeddingFile}
+          model={model}
+          modelLabel={getModelLabel(task, model)}
+          wav2vecPrediction={wav2vecPrediction}
+          whisperPrediction={whisperPrediction}
+          perturbedPredictions={perturbedPredictions}
+          isLoading={isLoadingPredictions}
+          isLoadingPerturbed={isLoadingPerturbed}
+          error={predictionError}
+          showPerturbed={showPerturbed}
+        />
+      )
+    : undefined;
+
   return (
     <EmbeddingProvider>
       <div className="h-screen flex flex-col bg-background">
         {/* Top Navigation Bar */}
         <Toolbar
-          apiData={apiData}
-          setApiData={setApiData}
+          task={task}
           selectedFile={selectedFile}
           uploadedFiles={uploadedFiles}
           onFileSelect={setSelectedFile}
-          model={model}        // current model value
+          model={model}
           setModel={setModel}
           dataset={dataset}
           setDataset={setDataset}
@@ -532,6 +542,7 @@ export const MainLayout = () => {
               <EmbeddingPanel
                 model={model}
                 dataset={dataset}
+                batchAnalysis={task.capabilities.batchAnalysis}
                 availableFiles={availableFiles}
                 selectedFile={selectedEmbeddingFile}
                 onFileSelect={handleEmbeddingSelection}
@@ -539,23 +550,27 @@ export const MainLayout = () => {
             </Panel>
 
             <PanelResizeHandle className="w-1 bg-border hover:bg-primary/20 transition-colors" />
-            
-            {/* Center Panel: Predictions */}
+
+            {/* Center Panel: Task Explainability */}
             <Panel defaultSize={50} minSize={30}>
               <PanelGroup direction="vertical">
                 <Panel defaultSize={70} minSize={40}>
-                  <PredictionPanel 
-                    selectedFile={selectedFile}
-                    selectedEmbeddingFile={selectedEmbeddingFile}
-                    model={model}
-                    dataset={effectiveDataset}
-                    originalDataset={dataset}
-                    onPerturbationComplete={handlePerturbationComplete}
-                    onPredictionRefresh={handlePredictionRefresh}
-                    onPredictionUpdate={handlePredictionUpdate}
-                  />
+                  {task.status === "active" ? (
+                    <ExplainabilityPanel
+                      task={task}
+                      selectedFile={selectedFile}
+                      selectedEmbeddingFile={selectedEmbeddingFile}
+                      model={model}
+                      dataset={effectiveDataset}
+                      originalDataset={dataset}
+                      onPerturbationComplete={handlePerturbationComplete}
+                      onPredictionRefresh={handlePredictionRefresh}
+                    />
+                  ) : (
+                    <PlaceholderExplainability taskName={task.name} />
+                  )}
                 </Panel>
-                
+
                 <PanelResizeHandle className="h-1 bg-border hover:bg-primary/20 transition-colors" />
 
                 {/* Bottom Panel: Audio Dataset Table */}
@@ -581,23 +596,17 @@ export const MainLayout = () => {
             </Panel>
 
             <PanelResizeHandle className="w-1 bg-border hover:bg-primary/20 transition-colors" />
-            
-            {/* Right Panel: Audio Player & Label Editor */}
+
+            {/* Right Panel: Audio Player & Datapoint Editor */}
             <Panel defaultSize={25} minSize={20}>
-              <DatapointEditorPanel 
+              <DatapointEditorPanel
                 selectedFile={selectedFile}
                 selectedEmbeddingFile={selectedEmbeddingFile}
                 dataset={effectiveDataset}
                 originalDataset={dataset}
                 perturbationResult={perturbationResult}
                 predictionMap={predictionMap}
-                model={model}
-                wav2vecPrediction={wav2vecPrediction}
-                whisperPrediction={whisperPrediction}
-                perturbedPredictions={perturbedPredictions}
-                isLoadingPredictions={isLoadingPredictions}
-                isLoadingPerturbed={isLoadingPerturbed}
-                predictionError={predictionError}
+                renderPredictionResults={renderPredictionResults}
               />
             </Panel>
           </PanelGroup>
