@@ -1,4 +1,5 @@
 import logging
+import threading
 import torch
 from torch import nn
 from transformers import (
@@ -23,7 +24,29 @@ import umap
 logger = logging.getLogger(__name__)
 
 
+# transformers v5 weight loading is not thread-safe: models loaded concurrently
+# (as happens when the frontend batch-runs inference) come back with corrupted
+# weights and produce garbage output. Serialize every from_pretrained/pipeline
+# call through this lock and cache the loaded objects for reuse.
+_HF_LOAD_LOCK = threading.Lock()
+_MODEL_CACHE = {}
+
+def _load_once(key, factory):
+    if key not in _MODEL_CACHE:
+        with _HF_LOAD_LOCK:
+            if key not in _MODEL_CACHE:
+                _MODEL_CACHE[key] = factory()
+    return _MODEL_CACHE[key]
+
+# Cached models are shared across request threads, so serialize whisper
+# transcription; torch already uses all CPU cores for a single inference.
+_WHISPER_INFER_LOCK = threading.Lock()
+
 def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, return_timestamps=False, return_attention=False):
+    with _WHISPER_INFER_LOCK:
+        return _transcribe_whisper_impl(model_id, audio_file, chunk_length_s, batch_size, return_timestamps, return_attention)
+
+def _transcribe_whisper_impl(model_id, audio_file, chunk_length_s=30, batch_size=8, return_timestamps=False, return_attention=False):
     device = 0 if torch.cuda.is_available() else -1
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     # Load audio
@@ -33,9 +56,12 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
     # For attention extraction, we need to use the raw model, not the pipeline
     if return_attention:
         
-        processor = WhisperProcessor.from_pretrained(model_id)
+        processor = _load_once(f"whisper-proc:{model_id}", lambda: WhisperProcessor.from_pretrained(model_id))
         # CRITICAL FIX: Use eager attention to support output_attentions=True
-        model = WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager")
+        model = _load_once(
+            f"whisper-gen-eager:{model_id}",
+            lambda: WhisperForConditionalGeneration.from_pretrained(model_id, attn_implementation="eager"),
+        )
         model = model.to("cuda:0" if torch.cuda.is_available() else "cpu")
         
         # Process audio to input features
@@ -132,7 +158,7 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     # Load model specifically for attention (reuse existing processor)
                     from transformers import WhisperModel
                     
-                    whisper_model = WhisperModel.from_pretrained(model_id)
+                    whisper_model = _load_once(f"whisper-model:{model_id}", lambda: WhisperModel.from_pretrained(model_id))
                     # Use the processor that's already defined above
                     
                     # Move to same device
@@ -196,15 +222,15 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
                     
                     try:
                         from transformers import AutoProcessor, AutoModel
-                        processor = AutoProcessor.from_pretrained(model_id)
+                        processor = _load_once(f"auto-proc:{model_id}", lambda: AutoProcessor.from_pretrained(model_id))
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = AutoModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = _load_once(f"auto-model-eager:{model_id}", lambda: AutoModel.from_pretrained(model_id, attn_implementation="eager"))
                         logger.info("Using AutoProcessor and AutoModel with eager attention")
                     except Exception as auto_error:
                         logger.info(f"AutoProcessor failed: {auto_error}, trying WhisperProcessor")
-                        processor = WhisperProcessor.from_pretrained(model_id)  
+                        processor = _load_once(f"whisper-proc:{model_id}", lambda: WhisperProcessor.from_pretrained(model_id))
                         # CRITICAL FIX: Use eager attention for output_attentions=True
-                        model_for_attention = WhisperModel.from_pretrained(model_id, attn_implementation="eager")
+                        model_for_attention = _load_once(f"whisper-model-eager:{model_id}", lambda: WhisperModel.from_pretrained(model_id, attn_implementation="eager"))
                     
                     if device and device != "cpu":
                         model_for_attention = model_for_attention.to(device)
@@ -299,29 +325,32 @@ def transcribe_whisper(model_id, audio_file, chunk_length_s=30, batch_size=8, re
             return result_dict
     
     # For regular transcription without attention, use pipeline
-    try:
-        pipe = pipeline(
-            "automatic-speech-recognition",
-            model=model_id,
-            torch_dtype=torch_dtype,
-            device=device,
-        )
-    except NotImplementedError as e:
-        if "meta tensor" in str(e):
-            # Fallback for meta tensor issue: load on CPU first then move to CUDA
-            pipe = pipeline(
+    def _make_pipe():
+        try:
+            return pipeline(
                 "automatic-speech-recognition",
                 model=model_id,
                 torch_dtype=torch_dtype,
-                device=-1,  # Force CPU first
+                device=device,
             )
-            if torch.cuda.is_available():
-                try:
-                    pipe.model = pipe.model.to("cuda:0")
-                except Exception:
-                    pass  # Stay on CPU if move fails
-        else:
+        except NotImplementedError as e:
+            if "meta tensor" in str(e):
+                # Fallback for meta tensor issue: load on CPU first then move to CUDA
+                p = pipeline(
+                    "automatic-speech-recognition",
+                    model=model_id,
+                    torch_dtype=torch_dtype,
+                    device=-1,  # Force CPU first
+                )
+                if torch.cuda.is_available():
+                    try:
+                        p.model = p.model.to("cuda:0")
+                    except Exception:
+                        pass  # Stay on CPU if move fails
+                return p
             raise
+
+    pipe = _load_once(f"asr-pipe:{model_id}", _make_pipe)
     audio, sample_rate = librosa.load(audio_file, sr=16000)
     audio = audio.astype(np.float32)
 
@@ -633,7 +662,7 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
                 # Use the base model mentioned in the HuggingFace page
                 base_model_id = "jonatasgrosman/wav2vec2-large-xlsr-53-english"
                 # CRITICAL FIX: Use eager attention for output_attentions=True
-                base_model = Wav2Vec2Model.from_pretrained(base_model_id, attn_implementation="eager")
+                base_model = _load_once(f"w2v-eager:{base_model_id}", lambda: Wav2Vec2Model.from_pretrained(base_model_id, attn_implementation="eager"))
                 base_model = base_model.to(emo_device)
                 
                 logger.info(f"Loaded base model: {base_model_id}")
@@ -725,9 +754,9 @@ def predict_emotion_wave2vec(audio_path, return_attention=False):
             try:
                 # Use already imported Wav2Vec2 classes
                 base_model_name = "facebook/wav2vec2-base-960h"
-                processor = Wav2Vec2Processor.from_pretrained(base_model_name)
+                processor = _load_once(f"w2v-proc:{base_model_name}", lambda: Wav2Vec2Processor.from_pretrained(base_model_name))
                 # CRITICAL FIX: Use eager attention for output_attentions=True
-                base_model = Wav2Vec2Model.from_pretrained(base_model_name, attn_implementation="eager")
+                base_model = _load_once(f"w2v-eager:{base_model_name}", lambda: Wav2Vec2Model.from_pretrained(base_model_name, attn_implementation="eager"))
                 
                 # Use the available device from the emotion model
                 if emo_device and emo_device != torch.device("cpu"):
@@ -856,30 +885,34 @@ _whisper_model_large = None
 def get_whisper_base_models():
     global _whisper_processor_base, _whisper_model_base
     if _whisper_processor_base is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
-        _whisper_model_base = WhisperModel.from_pretrained("openai/whisper-base")
-        _whisper_model_base = _whisper_model_base.to(device)
+        with _HF_LOAD_LOCK:
+            if _whisper_processor_base is None:
+                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                _whisper_processor_base = WhisperProcessor.from_pretrained("openai/whisper-base")
+                _whisper_model_base = WhisperModel.from_pretrained("openai/whisper-base")
+                _whisper_model_base = _whisper_model_base.to(device)
     return _whisper_processor_base, _whisper_model_base
 
 def get_whisper_large_models():
     global _whisper_processor_large, _whisper_model_large
     if _whisper_processor_large is None:
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        _whisper_processor_large = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
-        try:
-            _whisper_model_large = WhisperModel.from_pretrained(
-                "openai/whisper-large-v3",
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            )
-            _whisper_model_large = _whisper_model_large.to(device)
-        except NotImplementedError as e:
-            if "meta tensor" in str(e):
-                # Handle meta tensor issue for embeddings model too
-                _whisper_model_large = WhisperModel.from_pretrained("openai/whisper-large-v3")
-                _whisper_model_large = _whisper_model_large.to(device)
-            else:
-                raise
+        with _HF_LOAD_LOCK:
+            if _whisper_processor_large is None:
+                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                _whisper_processor_large = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
+                try:
+                    _whisper_model_large = WhisperModel.from_pretrained(
+                        "openai/whisper-large-v3",
+                        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    )
+                    _whisper_model_large = _whisper_model_large.to(device)
+                except NotImplementedError as e:
+                    if "meta tensor" in str(e):
+                        # Handle meta tensor issue for embeddings model too
+                        _whisper_model_large = WhisperModel.from_pretrained("openai/whisper-large-v3")
+                        _whisper_model_large = _whisper_model_large.to(device)
+                    else:
+                        raise
     return _whisper_processor_large, _whisper_model_large
 
 def extract_whisper_embeddings(audio_file_path: str, model_size: str = "base") -> np.ndarray:
