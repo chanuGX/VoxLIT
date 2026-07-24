@@ -1,0 +1,50 @@
+{
+  "model": "speechbrain/spkrec-xvect-voxceleb",
+  "scoring_method": "cosine_similarity",
+  "embedding_normalization": "normalize_false",
+  "calibration_scores_file": "outputs\\pair_scores\\xvector_calibration_scores.csv",
+  "selection_criterion": "eer",
+  "selected_threshold": 0.9341393113136292,
+  "number_of_pairs": 2000,
+  "same_speaker_pairs": 1000,
+  "different_speaker_pairs": 1000,
+  "roc_auc": 0.944063,
+  "score_statistics": {
+    "same_speaker": {
+      "mean": 0.9519202837944031,
+      "standard_deviation": 0.015785414974865197,
+      "minimum": 0.884878396987915,
+      "maximum": 0.9986337423324584
+    },
+    "different_speaker": {
+      "mean": 0.8993057467341423,
+      "standard_deviation": 0.03011077731249673,
+      "minimum": 0.8063050508499146,
+      "maximum": 0.9664134979248048
+    }
+  },
+  "threshold_candidates": {
+    "eer": 0.139,
+    "eer_threshold": 0.9341393113136292,
+    "eer_far": 0.139,
+    "eer_frr": 0.139,
+    "balanced_accuracy_threshold": 0.9331924319267272,
+    "best_balanced_accuracy": 0.8645,
+    "youden_threshold": 0.9331924319267272,
+    "youden_value": 0.729
+  },
+  "selected_threshold_metrics": {
+    "accuracy": 0.861,
+    "balanced_accuracy": 0.861,
+    "precision": 0.861,
+    "recall": 0.861,
+    "specificity": 0.861,
+    "f1_score": 0.861,
+    "far": 0.139,
+    "frr": 0.139,
+    "true_negatives": 861,
+    "false_positives": 139,
+    "false_negatives": 139,
+    "true_positives": 861
+  }
+}

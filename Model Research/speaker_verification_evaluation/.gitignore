@@ -1,0 +1,41 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Raw audio dataset
+data/raw/
+
+# Downloaded pretrained models
+pretrained_models/
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.safetensors
+
+# Generated embeddings
+outputs/embeddings/
+*.npy
+
+# Temporary/cache files
+.cache/
+huggingface/
+speechbrain/
+*.tmp
+*.log
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+kaggle.json
