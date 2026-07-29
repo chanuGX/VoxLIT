@@ -17,6 +17,10 @@ outputs/predictions/
 *.bin
 *.safetensors
 
-# Secrets and local configuration
-.env
-kaggle.json
+# Large clustering outputs
+outputs/clustering/**/similarity_matrix.csv
+outputs/clustering/**/clustering_results.csv
+outputs/clustering/ecapa_10speakers_50clips
+outputs/clustering/ecapa_10speakers_100clips
+outputs/clustering/wespeaker_10speakers_50clips
+outputs/clustering/wespeaker_10speakers_100clips
