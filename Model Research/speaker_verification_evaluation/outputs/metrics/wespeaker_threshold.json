@@ -1,0 +1,53 @@
+{
+  "model_key": "wespeaker",
+  "model": "pyannote/wespeaker-voxceleb-resnet34-LM",
+  "model_role": "candidate",
+  "embedding_dimension": 256,
+  "scoring_method": "cosine_similarity",
+  "embedding_normalization": "l2_normalized",
+  "calibration_scores_file": "outputs\\pair_scores\\wespeaker_calibration_scores.csv",
+  "selection_criterion": "eer",
+  "selected_threshold": 0.3843278586864471,
+  "number_of_pairs": 2000,
+  "same_speaker_pairs": 1000,
+  "different_speaker_pairs": 1000,
+  "roc_auc": 0.999228,
+  "score_statistics": {
+    "same_speaker": {
+      "mean": 0.6369713045060634,
+      "standard_deviation": 0.10191830168558048,
+      "minimum": 0.2593942880630493,
+      "maximum": 0.9780275225639344
+    },
+    "different_speaker": {
+      "mean": 0.10886533319455335,
+      "standard_deviation": 0.1007943257253816,
+      "minimum": -0.1808484494686126,
+      "maximum": 0.4872415065765381
+    }
+  },
+  "threshold_candidates": {
+    "eer": 0.014000000000000005,
+    "eer_threshold": 0.3843278586864471,
+    "eer_far": 0.014,
+    "eer_frr": 0.014000000000000012,
+    "balanced_accuracy_threshold": 0.3952186405658722,
+    "best_balanced_accuracy": 0.987,
+    "youden_threshold": 0.3952186405658722,
+    "youden_value": 0.974
+  },
+  "selected_threshold_metrics": {
+    "accuracy": 0.986,
+    "balanced_accuracy": 0.986,
+    "precision": 0.986,
+    "recall": 0.986,
+    "specificity": 0.986,
+    "f1_score": 0.986,
+    "far": 0.014,
+    "frr": 0.014,
+    "true_negatives": 986,
+    "false_positives": 14,
+    "false_negatives": 14,
+    "true_positives": 986
+  }
+}

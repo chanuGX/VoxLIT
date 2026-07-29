@@ -1,0 +1,46 @@
+{
+  "model_key": "wespeaker",
+  "model": "pyannote/wespeaker-voxceleb-resnet34-LM",
+  "model_role": "candidate",
+  "embedding_dimension": 256,
+  "scoring_method": "cosine_similarity",
+  "embedding_normalization": "l2_normalized",
+  "test_scores_file": "outputs\\pair_scores\\wespeaker_test_scores.csv",
+  "threshold_file": "outputs\\metrics\\wespeaker_threshold.json",
+  "threshold_selection_criterion": "eer",
+  "locked_threshold": 0.3843278586864471,
+  "number_of_test_pairs": 5000,
+  "same_speaker_pairs": 2500,
+  "different_speaker_pairs": 2500,
+  "accuracy": 0.9794,
+  "balanced_accuracy": 0.9794,
+  "precision": 0.9901840490797545,
+  "recall": 0.9684,
+  "specificity": 0.9904,
+  "f1_score": 0.9791708796764409,
+  "roc_auc": 0.99853856,
+  "test_eer": 0.02000000000000001,
+  "test_eer_threshold": 0.3509639799594879,
+  "far_at_locked_threshold": 0.0096,
+  "frr_at_locked_threshold": 0.0316,
+  "confusion_matrix": {
+    "true_negatives": 2476,
+    "false_positives": 24,
+    "false_negatives": 79,
+    "true_positives": 2421
+  },
+  "score_statistics": {
+    "same_speaker": {
+      "mean": 0.6297735745251178,
+      "standard_deviation": 0.11260390893674906,
+      "minimum": 0.1873893141746521,
+      "maximum": 0.9792016744613647
+    },
+    "different_speaker": {
+      "mean": 0.10213156059928001,
+      "standard_deviation": 0.1043751638376984,
+      "minimum": -0.1818865090608596,
+      "maximum": 0.4670708775520324
+    }
+  }
+}
