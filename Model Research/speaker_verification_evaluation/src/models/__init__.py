@@ -1,0 +1,1 @@
+"""Speaker-verification model adapters."""
