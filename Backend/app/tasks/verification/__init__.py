@@ -5,6 +5,6 @@ service.py. The router is mounted at /tasks/task-a by main.py.
 """
 from .router import router
 
-TASK_INFO = {"id": "task-a", "name": "Voice Task A"}
+TASK_INFO = {"id": "verification", "name": "Speaker verification"}
 
 __all__ = ["TASK_INFO", "router"]

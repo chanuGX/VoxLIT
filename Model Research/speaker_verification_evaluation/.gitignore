@@ -3,7 +3,7 @@
 __pycache__/
 *.py[cod]
 .venv/
-
+tests/
 # Data and model artifacts
 data/raw/
 pretrained_models/
@@ -24,3 +24,5 @@ outputs/clustering/ecapa_10speakers_50clips
 outputs/clustering/ecapa_10speakers_100clips
 outputs/clustering/wespeaker_10speakers_50clips
 outputs/clustering/wespeaker_10speakers_100clips
+
+data/

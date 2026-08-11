@@ -29,10 +29,10 @@ TASKS: dict[str, dict] = {
         "models": ["wav2vec2"],
         "datasets": ["ravdess"],
     },
-    "task-a": {
-        "name": "Voice Task A",  # rename after the task is finalized
-        "status": "placeholder",
-        "models": [],
+    "verification": {
+        "name": "Speaker Verification",  # rename after the task is finalized
+        "status": "active",
+        "models": ["ecapa-tdnn", "resnet34-lm"],
         "datasets": [],
     },
     "task-b": {
