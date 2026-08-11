@@ -500,6 +500,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   // Per-task results card for the Datapoint Editor (from the registry slots).
   // Placeholder tasks have no slot component and render no results card.
   const PredictionResults = TASK_SLOTS[task.id].PredictionResults;
+  const WorkbenchCenter = TASK_SLOTS[task.id].WorkbenchCenter;
   const renderPredictionResults = PredictionResults
     ? (showPerturbed: boolean) => (
         <PredictionResults
@@ -555,7 +556,12 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
             <Panel defaultSize={50} minSize={30}>
               <PanelGroup direction="vertical">
                 <Panel defaultSize={70} minSize={40}>
-                  {task.status === "active" ? (
+                  {WorkbenchCenter ? (
+                    <WorkbenchCenter
+                      model={model}
+                      modelLabel={getModelLabel(task, model)}
+                    />
+                  ) : task.status === "active" ? (
                     <ExplainabilityPanel
                       task={task}
                       selectedFile={selectedFile}

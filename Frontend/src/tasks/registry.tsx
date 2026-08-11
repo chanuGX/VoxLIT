@@ -2,6 +2,7 @@ import React from "react";
 import { TaskDefinition, TaskId, PredictionResultsProps } from "./types";
 import { TranscriptionResults } from "@/features/transcription/TranscriptionResults";
 import { ClassificationResults } from "@/features/emotion/ClassificationResults";
+import { SpeakerVerificationWorkbench } from "@/features/verification";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -76,17 +77,20 @@ export const TASKS: TaskDefinition[] = [
     },
   },
   {
-    id: "task-a",
-    route: "/tasks/task-a",
-    // Rename after the task is finalized — one-line change:
-    name: "Voice Task A",
-    shortDescription: "New audio interpretability task — details to be finalized.",
-    status: "placeholder",
-    models: [{ id: "task-a-model-1", label: "Model (to be added)", available: false }],
-    defaultModel: null,
-    datasets: [{ id: "task-a-dataset-1", label: "Dataset (to be added)", available: false }],
+    id: "verification",
+    route: "/tasks/verification",
+    name: "Speaker Verification",
+    shortDescription:
+      "Compare an enrolment profile with a probe recording using calibrated speaker embeddings, pair scores, cluster compactness, and perturbation-based explanations.",
+    status: "active",
+    models: [
+      { id: "ecapa-tdnn", label: "ECAPA-TDNN", available: true },
+      { id: "resnet34-lm", label: "WeSpeaker ResNet34-LM", available: true },
+    ],
+    defaultModel: "ecapa-tdnn",
+    datasets: [{ id: "voxceleb1-indian", label: "VoxCeleb1 Indian (evaluation only)", available: false }],
     defaultDataset: null,
-    allowCustomDatasets: true,
+    allowCustomDatasets: false,
     capabilities: {
       saliency: false,
       attention: false,
@@ -160,11 +164,14 @@ export const getModelLabel = (task: TaskDefinition, modelId: string): string =>
  */
 export const TASK_SLOTS: Record<
   TaskId,
-  { PredictionResults?: React.ComponentType<PredictionResultsProps> }
+  {
+    PredictionResults?: React.ComponentType<PredictionResultsProps>;
+    WorkbenchCenter?: React.ComponentType<{ model: string; modelLabel: string }>;
+  }
 > = {
   transcription: { PredictionResults: TranscriptionResults },
   emotion: { PredictionResults: ClassificationResults },
-  "task-a": {},
+  verification: { WorkbenchCenter: SpeakerVerificationWorkbench },
   "task-b": {},
   "task-c": {},
 };

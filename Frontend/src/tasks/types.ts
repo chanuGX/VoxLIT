@@ -11,7 +11,7 @@
  * prefixes, so they must NEVER change once created — only display names in
  * `registry.tsx` change when a task is finalized.
  */
-export type TaskId = "transcription" | "emotion" | "task-a" | "task-b" | "task-c";
+export type TaskId = "transcription" | "emotion" | "verification" | "task-b" | "task-c";
 
 export type TaskStatus = "active" | "placeholder";
 
