@@ -1,4 +1,4 @@
-"""Speaker Verification endpoints (mounted at /tasks/task-a)."""
+"""Speaker Verification endpoints (mounted at /tasks/verification)."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ from .service import (
 
 router = APIRouter()
 
+@router.get("/models")
+async def available_models():
+    return {"models": list_models()}
+
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 MAX_FILE_BYTES = 50 * 1024 * 1024
 
@@ -40,10 +44,6 @@ def _save_upload(file: UploadFile, destination: Path) -> None:
     if destination.stat().st_size > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"Audio file exceeds 50 MB: {file.filename}")
 
-
-@router.get("/models")
-async def available_models():
-    return {"models": list_models()}
 
 
 @router.post("/verify")
