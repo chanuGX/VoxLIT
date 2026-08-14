@@ -21,3 +21,6 @@ lime>=0.2.0
 shap>=0.42.0
 accelerate
 torchaudio
+speechbrain==1.1.0
+pyannote.audio==3.4.0
+huggingface_hub==0.36.2

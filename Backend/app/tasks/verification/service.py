@@ -21,6 +21,8 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 
+from app.core.settings import settings
+
 
 @dataclass(frozen=True, slots=True)
 class SpeakerModelSpec:
@@ -110,19 +112,25 @@ class _ECAPAAdapter(_BaseAdapter):
         super().__init__(spec.embedding_dimension)
         try:
             from speechbrain.inference.classifiers import EncoderClassifier
-            from speechbrain.utils.fetching import LocalStrategy
+            from speechbrain.utils.fetching import FetchConfig, LocalStrategy
         except ImportError as error:
             raise SpeakerModelUnavailable(
                 "ECAPA-TDNN requires the 'speechbrain' package. "
                 "Install the backend requirements and restart the API."
             ) from error
 
+        savedir = settings.speaker_verification_ecapa_dir
+        hf_cache_dir = settings.speaker_verification_hf_cache_dir
+        savedir.mkdir(parents=True, exist_ok=True)
+        hf_cache_dir.mkdir(parents=True, exist_ok=True)
+
         try:
             self.model = EncoderClassifier.from_hparams(
                 source=spec.model_id,
-                savedir="pretrained_models/spkrec-ecapa-voxceleb",
+                savedir=str(savedir),
                 run_opts={"device": str(self.device)},
                 local_strategy=LocalStrategy.COPY,
+                fetch_config=FetchConfig(huggingface_cache_dir=str(hf_cache_dir)),
             )
             if hasattr(self.model, "to"):
                 self.model.to(self.device)
@@ -154,10 +162,13 @@ class _WeSpeakerAdapter(_BaseAdapter):
                 "Install the backend requirements and restart the API."
             ) from error
 
+        hf_cache_dir = settings.speaker_verification_hf_cache_dir
+        hf_cache_dir.mkdir(parents=True, exist_ok=True)
+
         previous_setting = os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD")
         os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         try:
-            model = Model.from_pretrained(spec.model_id)
+            model = Model.from_pretrained(spec.model_id, cache_dir=str(hf_cache_dir))
         except Exception as error:
             raise SpeakerModelUnavailable(f"Could not load ResNet34-LM: {error}") from error
         finally:
