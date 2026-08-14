@@ -33,7 +33,7 @@ TASKS: dict[str, dict] = {
         "name": "Speaker Verification",  # rename after the task is finalized
         "status": "active",
         "models": ["ecapa-tdnn", "resnet34-lm"],
-        "datasets": [],
+        "datasets": ["voxceleb1-indian-demo"],
     },
     "task-b": {
         "name": "Voice Task B",

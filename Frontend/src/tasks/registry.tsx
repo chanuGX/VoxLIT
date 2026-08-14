@@ -88,7 +88,7 @@ export const TASKS: TaskDefinition[] = [
       { id: "resnet34-lm", label: "WeSpeaker ResNet34-LM", available: true },
     ],
     defaultModel: "ecapa-tdnn",
-    datasets: [{ id: "voxceleb1-indian", label: "VoxCeleb1 Indian (evaluation only)", available: false }],
+    datasets: [{ id: "voxceleb1-indian-demo", label: "VoxCeleb1 Indian (Demo)", available: false }],
     defaultDataset: null,
     allowCustomDatasets: false,
     capabilities: {

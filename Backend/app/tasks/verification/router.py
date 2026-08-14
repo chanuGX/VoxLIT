@@ -9,6 +9,15 @@ from tempfile import TemporaryDirectory
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from starlette.concurrency import run_in_threadpool
 
+from dataclasses import asdict
+
+from .dataset import (
+    DatasetUnavailable,
+    RecordingNotFound,
+    get_dataset_info,
+    get_recording,
+    list_recordings,
+)
 from .service import (
     SpeakerModelUnavailable,
     UnsupportedSpeakerModel,
@@ -23,6 +32,37 @@ router = APIRouter()
 @router.get("/models")
 async def available_models():
     return {"models": list_models()}
+
+
+@router.get("/dataset")
+async def dataset_info():
+    return get_dataset_info()
+
+
+@router.get("/dataset/recordings")
+async def dataset_recordings():
+    try:
+        recordings = list_recordings()
+    except DatasetUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return {
+        "dataset_id": get_dataset_info()["dataset_id"],
+        "total_recordings": len(recordings),
+        "recordings": [asdict(recording) for recording in recordings],
+    }
+
+
+@router.get("/dataset/recordings/{recording_id}")
+async def dataset_recording(recording_id: str):
+    try:
+        recording = get_recording(recording_id)
+    except DatasetUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RecordingNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return asdict(recording)
 
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 MAX_FILE_BYTES = 50 * 1024 * 1024
