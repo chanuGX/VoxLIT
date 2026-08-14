@@ -283,6 +283,65 @@ def verify_speaker(
     }
 
 
+def extract_batch_embeddings(
+    model_key: str, audio_paths: Sequence[str | Path]
+) -> torch.Tensor:
+    """Extract one L2-normalised embedding per recording, in request order."""
+
+    adapter = get_model(model_key)
+    embeddings = [adapter.extract_embedding(path) for path in audio_paths]
+    return torch.stack(embeddings)
+
+
+def pairwise_similarity_matrix(embeddings: torch.Tensor) -> np.ndarray:
+    """Symmetric NxN cosine-similarity matrix with an exact unit diagonal."""
+
+    normalized = F.normalize(embeddings, p=2, dim=1)
+    similarity = (normalized @ normalized.T).detach().cpu().numpy()
+    similarity = np.clip(similarity, -1.0, 1.0)
+    similarity = (similarity + similarity.T) / 2.0
+    np.fill_diagonal(similarity, 1.0)
+    return similarity
+
+
+def pairwise_decision_matrix(similarity: np.ndarray, threshold: float) -> np.ndarray:
+    """Symmetric NxN same-speaker decision matrix from a similarity matrix."""
+
+    decisions = similarity >= threshold
+    np.fill_diagonal(decisions, True)
+    return decisions
+
+
+def batch_verification_analysis(
+    model_key: str,
+    audio_paths: Sequence[str | Path],
+    labels: Sequence[str],
+) -> dict[str, object]:
+    """Pairwise embedding/similarity/decision analysis for 2-100 recordings."""
+
+    if not 2 <= len(audio_paths) <= 100:
+        raise ValueError("Batch verification requires between 2 and 100 recordings.")
+    if len(audio_paths) != len(labels):
+        raise ValueError("Recording paths and labels must have the same length.")
+
+    spec = get_model_spec(model_key)
+    embeddings = extract_batch_embeddings(model_key, audio_paths)
+    similarity = pairwise_similarity_matrix(embeddings)
+    decisions = pairwise_decision_matrix(similarity, spec.threshold)
+
+    return {
+        "model": spec.key,
+        "model_label": spec.label,
+        "threshold": spec.threshold,
+        "recording_count": len(audio_paths),
+        "embedding_dimension": spec.embedding_dimension,
+        "labels": list(labels),
+        "embeddings": embeddings.tolist(),
+        "similarity_matrix": similarity.tolist(),
+        "decision_matrix": decisions.tolist(),
+    }
+
+
 def temporal_occlusion_saliency(
     model_key: str,
     enrollment_paths: Sequence[str | Path],

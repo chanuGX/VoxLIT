@@ -46,17 +46,22 @@ def _recording_id_for(filename: str) -> str:
     return f"rec_{digest[:16]}"
 
 
-def _discover(dataset_dir: Path) -> list[RecordingInfo]:
+def _iter_audio_files(dataset_dir: Path):
     if not dataset_dir.is_dir():
         raise DatasetUnavailable(f"Speaker-verification demo dataset not found: {DATASET_ID}")
 
-    recordings: list[RecordingInfo] = []
     for entry in dataset_dir.iterdir():
         if not entry.is_file():
             continue
-        extension = entry.suffix.lower()
-        if extension not in SUPPORTED_AUDIO_EXTENSIONS:
+        if entry.suffix.lower() not in SUPPORTED_AUDIO_EXTENSIONS:
             continue
+        yield entry
+
+
+def _discover(dataset_dir: Path) -> list[RecordingInfo]:
+    recordings: list[RecordingInfo] = []
+    for entry in _iter_audio_files(dataset_dir):
+        extension = entry.suffix.lower()
         recording_id = _recording_id_for(entry.name)
         recordings.append(
             RecordingInfo(
@@ -114,4 +119,19 @@ def get_recording(recording_id: str) -> RecordingInfo:
     for recording in list_recordings():
         if recording.recording_id == recording_id:
             return recording
+    raise RecordingNotFound(f"Unknown recording id: {recording_id}")
+
+
+def resolve_recording_path(recording_id: str) -> Path:
+    """Resolve a safe recording id to its on-disk path for internal use only.
+
+    Never exposed via the router. Reuses the same id derivation as
+    `get_recording`, so unknown or path-traversal ids simply miss and raise
+    `RecordingNotFound` without touching the filesystem with untrusted input.
+    """
+
+    dataset_dir = _dataset_dir()
+    for entry in _iter_audio_files(dataset_dir):
+        if _recording_id_for(entry.name) == recording_id:
+            return entry
     raise RecordingNotFound(f"Unknown recording id: {recording_id}")
