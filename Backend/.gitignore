@@ -236,3 +236,6 @@ secrets.json
 .dockerignore
 
 /data
+
+# Speaker-verification model weights and Hugging Face cache — never commit
+/pretrained_models/
