@@ -123,11 +123,15 @@ def get_recording(recording_id: str) -> RecordingInfo:
 
 
 def resolve_recording_path(recording_id: str) -> Path:
-    """Resolve a safe recording id to its on-disk path for internal use only.
+    """Resolve a safe recording id to its on-disk path.
 
-    Never exposed via the router. Reuses the same id derivation as
-    `get_recording`, so unknown or path-traversal ids simply miss and raise
-    `RecordingNotFound` without touching the filesystem with untrusted input.
+    Used both internally (batch analysis) and by the
+    `/dataset/recordings/{recording_id}/audio` route, which streams the
+    resolved file's bytes but never returns this `Path`, the real filename,
+    or any other filesystem detail in a response. Reuses the same id
+    derivation as `get_recording`, so unknown or path-traversal ids simply
+    miss and raise `RecordingNotFound` without touching the filesystem with
+    untrusted input.
     """
 
     dataset_dir = _dataset_dir()

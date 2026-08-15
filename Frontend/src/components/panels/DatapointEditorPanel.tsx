@@ -62,10 +62,9 @@ export const DatapointEditorPanel = ({
   const [showPerturbed, setShowPerturbed] = useState(false);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
 
-  // Speaker Verification's demo dataset has no safe way to serve audio by
-  // opaque recording_id today (resolve_recording_path is deliberately never
-  // exposed via the backend router — ground-truth safety). Show an explicit
-  // "unavailable" state instead of attempting a broken /{dataset}/file/... URL.
+  // Speaker Verification's demo dataset serves audio only through a
+  // task-specific, opaque-id-only endpoint (ground-truth safety) — never the
+  // generic /{dataset}/file/... route, which would require the real filename.
   const isDemoDatasetPlayback = isVerificationDemoDataset(originalDataset) || isVerificationDemoDataset(dataset);
 
   // Resolve the selected opaque recording_id against the safe recording list
@@ -76,7 +75,15 @@ export const DatapointEditorPanel = ({
     : null;
 
   const audioUrl = (() => {
-    if (isDemoDatasetPlayback) return undefined;
+    // Demo-dataset recordings: stream by opaque recording_id only, through
+    // the task-specific audio endpoint. Falls through to undefined (safe,
+    // same as "no file selected") if the id hasn't resolved against the
+    // loaded recording list yet.
+    if (isDemoDatasetPlayback) {
+      return demoRecording
+        ? `${API_BASE}/tasks/verification/dataset/recordings/${encodeURIComponent(demoRecording.recording_id)}/audio`
+        : undefined;
+    }
 
     // If showing perturbed audio and it's available
     if (showPerturbed && perturbationResult?.success) {
@@ -136,9 +143,10 @@ export const DatapointEditorPanel = ({
       };
     }
 
-    // Demo-dataset selections: only the safe fields the backend actually
-    // returns (display_filename/extension/size_bytes) — no duration/sample
-    // rate, since no audio bytes are ever fetched for this dataset.
+    // Demo-dataset selections: filename/extension/size come from the safe
+    // recording list; duration/sample rate are left undefined here so the
+    // render falls through to audioMetadata, populated once WaveSurfer
+    // decodes the audio loaded from the task-specific audio endpoint.
     if (demoRecording) {
       return {
         filename: demoRecording.display_filename,
@@ -278,7 +286,7 @@ export const DatapointEditorPanel = ({
                   ? `${currentFileInfo.duration.toFixed(1)}s`
                   : audioMetadata.duration
                   ? `${audioMetadata.duration.toFixed(1)}s`
-                  : demoRecording ? "Not available" : "Loading..."}
+                  : isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             <div className="text-xs-tight">
@@ -288,7 +296,7 @@ export const DatapointEditorPanel = ({
                   ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz`
                   : audioMetadata.sampleRate
                   ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz`
-                  : demoRecording ? "Not available" : "Loading..."}
+                  : isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             {currentFileInfo?.extension && (
@@ -347,13 +355,6 @@ export const DatapointEditorPanel = ({
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-2.5">
-            {isDemoDatasetPlayback ? (
-              <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
-                <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
-                Playback unavailable for demo dataset
-              </div>
-            ) : (
-              <>
             <WaveformViewer
               audioUrl={audioUrl}
               isPlaying={isPlaying}
@@ -410,8 +411,6 @@ export const DatapointEditorPanel = ({
                 }
               }}
             />
-              </>
-            )}
           </CardContent>
         </Card>
       </div>

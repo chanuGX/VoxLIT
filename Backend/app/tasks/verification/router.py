@@ -8,11 +8,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import torch
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from dataclasses import asdict
+
+from app.services.dataset_service import media_type_for
 
 from . import cache, clustering
 from .dataset import (
@@ -74,6 +77,82 @@ async def dataset_recording(recording_id: str):
         raise HTTPException(status_code=404, detail=str(error)) from error
 
     return asdict(recording)
+
+
+@router.get("/dataset/recordings/{recording_id}/audio")
+@router.head("/dataset/recordings/{recording_id}/audio")
+async def dataset_recording_audio(recording_id: str, request: Request):
+    """Stream a demo recording's audio bytes by opaque id, safely.
+
+    Resolves strictly through `resolve_recording_path`, which only ever
+    compares the id against hashes of real filenames, so unknown or
+    traversal-style ids simply miss and 404 without touching the filesystem
+    with untrusted input. The response never carries the original filename,
+    speaker name, or filesystem path — only the opaque id + extension.
+    """
+
+    try:
+        audio_path = resolve_recording_path(recording_id)
+    except DatasetUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RecordingNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    try:
+        media_type = media_type_for(audio_path)
+    except ValueError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+
+    safe_name = f"{recording_id}{audio_path.suffix.lower()}"
+    file_size = audio_path.stat().st_size
+
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            range_value = range_header.replace("bytes=", "")
+            start_str, _, end_str = range_value.partition("-")
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+
+            start = max(0, min(start, file_size - 1))
+            end = max(start, min(end, file_size - 1))
+            content_length = end - start + 1
+
+            def generate_chunks():
+                with audio_path.open("rb") as handle:
+                    handle.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk = handle.read(min(8192, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                        yield chunk
+
+            return StreamingResponse(
+                generate_chunks(),
+                status_code=206,
+                media_type=media_type,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes {start}-{end}/{file_size}",
+                    "Content-Length": str(content_length),
+                    "Content-Disposition": f'inline; filename="{safe_name}"',
+                },
+            )
+        except (ValueError, IndexError):
+            pass
+
+    return FileResponse(
+        path=audio_path,
+        media_type=media_type,
+        headers={
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+        },
+    )
+
 
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 MAX_FILE_BYTES = 50 * 1024 * 1024

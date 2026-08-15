@@ -173,3 +173,56 @@ async def test_dataset_endpoints_404_when_dataset_missing(monkeypatch, client, t
 def test_real_dataset_has_exactly_92_recordings():
     recordings = dataset.list_recordings()
     assert len(recordings) == dataset.EXPECTED_RECORDING_COUNT
+
+
+def _assert_no_ground_truth_leak_headers(headers) -> None:
+    _assert_no_ground_truth_leak(dict(headers))
+
+
+@pytest.mark.asyncio
+async def test_dataset_recording_audio_returns_exact_bytes_and_headers(client, fake_dataset_dir):
+    listing = await client.get("/tasks/verification/dataset/recordings")
+    recording_id = listing.json()["recordings"][0]["recording_id"]
+
+    response = await client.get(f"/tasks/verification/dataset/recordings/{recording_id}/audio")
+
+    assert response.status_code == 200
+    assert response.content == b"RIFF-fake-audio"
+    assert response.headers["content-type"] == "audio/wav"
+    assert response.headers["content-disposition"] == f'inline; filename="{recording_id}.wav"'
+    _assert_no_ground_truth_leak_headers(response.headers)
+
+
+@pytest.mark.asyncio
+async def test_dataset_recording_audio_supports_range_requests(client, fake_dataset_dir):
+    listing = await client.get("/tasks/verification/dataset/recordings")
+    recording_id = listing.json()["recordings"][0]["recording_id"]
+
+    response = await client.get(
+        f"/tasks/verification/dataset/recordings/{recording_id}/audio",
+        headers={"Range": "bytes=0-3"},
+    )
+
+    assert response.status_code == 206
+    assert response.content == b"RIFF-fake-audio"[:4]
+    assert response.headers["content-range"] == "bytes 0-3/15"
+    assert response.headers["content-length"] == "4"
+    _assert_no_ground_truth_leak_headers(response.headers)
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["not-a-real-id", "../../etc/passwd", "id10018_01.wav", "", "rec_0000000000000000"],
+)
+@pytest.mark.asyncio
+async def test_dataset_recording_audio_rejects_unknown_and_traversal_ids(client, fake_dataset_dir, bad_id):
+    response = await client.get(f"/tasks/verification/dataset/recordings/{bad_id}/audio")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_dataset_recording_audio_404_when_dataset_missing(monkeypatch, client, tmp_path):
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+
+    response = await client.get("/tasks/verification/dataset/recordings/rec_anything/audio")
+    assert response.status_code == 404
