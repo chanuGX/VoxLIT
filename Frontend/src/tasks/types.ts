@@ -116,3 +116,53 @@ export interface PredictionResultsProps {
   error?: string | null;
   showPerturbed?: boolean;
 }
+
+/** A single demo-dataset recording as returned by
+ *  GET /tasks/verification/dataset/recordings. Opaque id only — never the
+ *  real VoxCeleb filename/speaker name. */
+export interface DatasetRecordingRef {
+  recording_id: string;
+  display_filename: string;
+  extension: string;
+  size_bytes: number;
+}
+
+/**
+ * Props every WorkbenchCenter slot component receives. Mirrors the shared
+ * selection/upload state TaskWorkbench already threads into AudioDatasetPanel
+ * and EmbeddingPanel, so a WorkbenchCenter implementation can participate in
+ * the same shared pipeline instead of building a parallel one.
+ */
+export interface WorkbenchCenterProps {
+  model: string;
+  modelLabel: string;
+  /** effectiveDataset ("custom" once any upload exists, else the raw dataset id) */
+  dataset: string;
+  /** raw toolbar dataset selection */
+  originalDataset: string;
+  availableFiles: string[];
+  uploadedFiles: UploadedFile[];
+  /** Raw File blobs for uploads still resident in this session, keyed by file_id. */
+  uploadedRawFiles: Record<string, File>;
+  selectedFile: UploadedFile | null;
+  selectedEmbeddingFile: string | null;
+  onFileSelect: (file: UploadedFile) => void;
+  /** Up to 2 embedding-plot labels currently selected for pair comparison. */
+  pairSelection: string[];
+  onClearPairSelection: () => void;
+  /** Verification-only safe dataset listing (null for other tasks / before load). */
+  datasetRecordings: DatasetRecordingRef[] | null;
+  /** Ids (recording_id or uploaded file_id) checked in the Audio Dataset table for batch input. */
+  selectedBatchIds: string[];
+  onSelectedBatchIdsChange: (ids: string[]) => void;
+  /** Lets this WorkbenchCenter register a function EmbeddingPanel calls when
+   *  its own PCA/UMAP/t-SNE/2D-3D controls change, so verification embeddings
+   *  can be re-projected without EmbeddingPanel knowing anything about it. */
+  onReprojectHandlerChange: (handler: ((reductionMethod: string, nComponents: number) => void) | null) => void;
+  /** Lets this WorkbenchCenter register a label→playback-id resolver, so a
+   *  clicked graph point's backend label (upload-000, rec_<hash>, ...) is
+   *  translated to its real file_id/recording_id before it ever reaches
+   *  selectedFile/Datapoint-Editor/Audio-Playback state. Never resolved from
+   *  projected coordinates — always the index-aligned run-time submission order. */
+  onLabelResolverChange: (resolver: ((label: string) => string | undefined) | null) => void;
+}

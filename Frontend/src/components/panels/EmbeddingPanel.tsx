@@ -8,10 +8,10 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
-import { EmbeddingPlot } from "../visualization/EmbeddingPlot";
+import { EmbeddingPlot, type ExternalEmbeddingPoint } from "../visualization/EmbeddingPlot";
 import { ScalarPlot } from "../visualization/ScalarPlot";
 import { useEmbedding } from "../../contexts/EmbeddingContext";
-import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle } from "lucide-react";
+import { RefreshCw, Eye, Box, Square, BarChart3, HelpCircle, Info } from "lucide-react";
 import { getFeatureExplanation } from "@/lib/audioFeatures";
 import { API_BASE } from "@/lib/api";
 import { BatchAnalysisKind } from "@/tasks/types";
@@ -24,6 +24,12 @@ interface EmbeddingPanelProps {
   availableFiles?: string[];
   selectedFile?: string | null;
   onFileSelect?: (filename: string) => void;
+  /** Speaker Verification only: renders backend cluster-colored points from
+   *  context instead of auto-fetching from the legacy embeddings endpoint. */
+  verificationMode?: boolean;
+  pairSelection?: string[];
+  onPairSelectionChange?: (labels: string[]) => void;
+  onReproject?: ((reductionMethod: string, nComponents: number) => void) | null;
 }
 
 // Audio Frequency Analysis interface (reusing from ScalersVisualization)
@@ -114,7 +120,7 @@ interface WhisperAnalysis {
   };
 }
 
-export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", batchAnalysis = null, availableFiles = [], selectedFile, onFileSelect }: EmbeddingPanelProps) => {
+export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", batchAnalysis = null, availableFiles = [], selectedFile, onFileSelect, verificationMode = false, pairSelection, onPairSelectionChange, onReproject }: EmbeddingPanelProps) => {
   const [reductionMethod, setReductionMethod] = useState("pca");
   const [is3D, setIs3D] = useState(false);
   const [selectionMode, setSelectionMode] = useState<'box' | 'lasso'>('box');
@@ -151,12 +157,22 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
   // Auto-fetch embeddings when model, dataset, or reduction method changes
   useEffect(() => {
+    if (verificationMode) return;
     if (availableFiles.length > 0 && model && dataset) {
       const filesToProcess = availableFiles;
       const nComponents = is3D ? 3 : 2;
       fetchEmbeddings(model, dataset, filesToProcess, reductionMethod, nComponents);
     }
-  }, [model, dataset, availableFiles, reductionMethod, fetchEmbeddings]);
+  }, [model, dataset, availableFiles, reductionMethod, fetchEmbeddings, verificationMode]);
+
+  // Speaker Verification: re-project already-computed embeddings via the
+  // caller-supplied onReproject whenever this panel's own PCA/UMAP/t-SNE or
+  // 2D/3D controls change — reuses the controls verbatim without ever
+  // calling the legacy /inferences/embeddings endpoint.
+  useEffect(() => {
+    if (!verificationMode) return;
+    onReproject?.(reductionMethod, is3D ? 3 : 2);
+  }, [verificationMode, reductionMethod, is3D, onReproject]);
 
   // Cleanup debounce timer on unmount
   useEffect(() => {
@@ -168,6 +184,10 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   }, []);
 
   const handleFetchEmbeddings = () => {
+    if (verificationMode) {
+      onReproject?.(reductionMethod, is3D ? 3 : 2);
+      return;
+    }
     if (availableFiles.length > 0) {
       // Use entire dataset for better visualization
       const filesToProcess = availableFiles;
@@ -183,6 +203,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
   const handle3DToggle = (checked: boolean) => {
     setIs3D(checked);
+    if (verificationMode) return; // the reproject effect handles this via its is3D dependency
     // Re-fetch with new dimensionality using entire dataset
     if (embeddingData && availableFiles.length > 0) {
       const filesToProcess = availableFiles;
@@ -192,24 +213,39 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   };
 
   const handlePointSelect = (filename: string, coordinates: number[]) => {
+    // A single point click always updates the existing selected-datapoint
+    // state (drives the Datapoint Editor), for every task including verification.
     if (onFileSelect) {
       onFileSelect(filename);
+    }
+    if (verificationMode) {
+      const prev = pairSelection ?? [];
+      const next = prev.includes(filename)
+        ? prev.filter((l) => l !== filename)
+        : prev.length < 2
+          ? [...prev, filename]
+          : [prev[1], filename];
+      onPairSelectionChange?.(next);
     }
   };
 
   const handleAngleRangeSelect = (selectedFiles: string[]) => {
+    if (verificationMode) {
+      onPairSelectionChange?.(selectedFiles.slice(0, 2));
+      return;
+    }
     // Only update if the selection has actually changed
     const currentSelection = selectedByAngle.sort().join(',');
     const newSelection = selectedFiles.sort().join(',');
-    
+
     if (currentSelection !== newSelection) {
       setSelectedByAngle(selectedFiles);
-      
+
       // Clear any existing debounce timer
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
-      
+
       // Debounce the analysis fetch to prevent rapid successive calls
       debounceRef.current = setTimeout(() => {
         if (selectedFiles.length > 0) {
@@ -222,18 +258,22 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   };
 
   const handle2DSelectionChange = (selectedFiles: string[]) => {
+    if (verificationMode) {
+      onPairSelectionChange?.(selectedFiles.slice(0, 2));
+      return;
+    }
     // Only update if the selection has actually changed
     const currentSelection = selectedPoints2D.sort().join(',');
     const newSelection = selectedFiles.sort().join(',');
-    
+
     if (currentSelection !== newSelection) {
       setSelectedPoints2D(selectedFiles);
-      
+
       // Clear any existing debounce timer
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
       }
-      
+
       // Debounce the analysis fetch to prevent rapid successive calls
       debounceRef.current = setTimeout(() => {
         if (selectedFiles.length > 0) {
@@ -499,74 +539,124 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               </Select>
               )}
 
-              {/* Analysis Type */}
-              <Select
-              value={analysisType}
-              onValueChange={(value: 'predictions' | 'common-terms' | 'audio-features') => {
-                setAnalysisType(value);
-                // Clear all analysis results and selections when changing analysis type
-                clearAnalysisResults();
-                setSelectedByAngle([]);
-                setSelectedPoints2D([]);
-              }}
-              >
-              <SelectTrigger className="flex-1 h-8 text-xs border border-gray-200 rounded-md">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {batchAnalysis === 'emotion-distribution' && (
-                <SelectItem value="predictions">Predictions</SelectItem>
-                )}
-                {batchAnalysis === 'transcript-terms' && (
-                <SelectItem value="common-terms">Common Terms</SelectItem>
-                )}
-                <SelectItem value="audio-features">Audio Features</SelectItem>
-              </SelectContent>
-              </Select>
+              {/* Analysis Type (not applicable to Speaker Verification) */}
+              {!verificationMode && (
+                <Select
+                value={analysisType}
+                onValueChange={(value: 'predictions' | 'common-terms' | 'audio-features') => {
+                  setAnalysisType(value);
+                  // Clear all analysis results and selections when changing analysis type
+                  clearAnalysisResults();
+                  setSelectedByAngle([]);
+                  setSelectedPoints2D([]);
+                }}
+                >
+                <SelectTrigger className="flex-1 h-8 text-xs border border-gray-200 rounded-md">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {batchAnalysis === 'emotion-distribution' && (
+                  <SelectItem value="predictions">Predictions</SelectItem>
+                  )}
+                  {batchAnalysis === 'transcript-terms' && (
+                  <SelectItem value="common-terms">Common Terms</SelectItem>
+                  )}
+                  <SelectItem value="audio-features">Audio Features</SelectItem>
+                </SelectContent>
+                </Select>
+              )}
             </div>
 
             {/* Status Messages */}
-            {availableFiles.length === 0 && (
-              <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
-                <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
-                No files available for embedding extraction
-              </div>
-            )}
-            {availableFiles.length > 0 && !embeddingData && !isLoading && (
-              <div className="text-xs flex items-center gap-2 p-3 bg-primary/5 rounded-sm border border-primary/20">
-                <div className="w-2 h-2 bg-primary rounded-full animate-pulse"></div>
-                Click <RefreshCw className="inline h-3 w-3 mx-1" /> to extract embeddings from all {availableFiles.length} files
-              </div>
-            )}
-            {isLoading && (
-              <div className="text-xs text-primary flex items-center gap-2 p-3 bg-primary/5 rounded-sm border border-primary/20">
-                <div className="w-2 h-2 bg-primary rounded-full animate-ping"></div>
-                Processing {availableFiles.length} files... This may take a few moments.
-              </div>
-            )}
-            {error && (
-              <div className="text-xs text-destructive flex items-center gap-2 p-3 bg-destructive/5 rounded-sm border border-destructive/20">
-                <div className="w-2 h-2 bg-destructive rounded-full"></div>
-                {error}
-              </div>
+            {verificationMode ? (
+              <>
+                {!embeddingData && (
+                  <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
+                    <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
+                    Run batch analysis in the Batch Analysis tab to populate this graph.
+                  </div>
+                )}
+                {embeddingData?.reduction_method_used && embeddingData.reduction_method_used !== embeddingData.reduction_method && (
+                  <div className="flex items-start gap-2 rounded-md bg-amber-50 p-2 text-[11px] text-amber-800">
+                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      {embeddingData.reduction_method.toUpperCase()} requires more recordings than this batch has —
+                      showing {embeddingData.reduction_method_used.toUpperCase()} instead.
+                    </span>
+                  </div>
+                )}
+                {embeddingData?.effective_components !== undefined && embeddingData.effective_components < embeddingData.n_components && (
+                  <div className="flex items-start gap-2 rounded-md bg-slate-100 p-2 text-[11px] text-slate-700">
+                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      Only {embeddingData.effective_components} of {embeddingData.n_components} axes carry real
+                      variation for this batch — the remaining axis is zero-padded.
+                    </span>
+                  </div>
+                )}
+                {embeddingData && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Projections are visual only. Clustering and pair-verification decisions always use the
+                    original speaker embeddings, never these reduced coordinates.
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                {availableFiles.length === 0 && (
+                  <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
+                    <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
+                    No files available for embedding extraction
+                  </div>
+                )}
+                {availableFiles.length > 0 && !embeddingData && !isLoading && (
+                  <div className="text-xs flex items-center gap-2 p-3 bg-primary/5 rounded-sm border border-primary/20">
+                    <div className="w-2 h-2 bg-primary rounded-full animate-pulse"></div>
+                    Click <RefreshCw className="inline h-3 w-3 mx-1" /> to extract embeddings from all {availableFiles.length} files
+                  </div>
+                )}
+                {isLoading && (
+                  <div className="text-xs text-primary flex items-center gap-2 p-3 bg-primary/5 rounded-sm border border-primary/20">
+                    <div className="w-2 h-2 bg-primary rounded-full animate-ping"></div>
+                    Processing {availableFiles.length} files... This may take a few moments.
+                  </div>
+                )}
+                {error && (
+                  <div className="text-xs text-destructive flex items-center gap-2 p-3 bg-destructive/5 rounded-sm border border-destructive/20">
+                    <div className="w-2 h-2 bg-destructive rounded-full"></div>
+                    {error}
+                  </div>
+                )}
+              </>
             )}
           </div>
 
           {/* Embedding Plot */}
           <div className="h-[450px] border border-border rounded-lg bg-card p-1.5 overflow-hidden">
-            <EmbeddingPlot 
-              selectedMethod={reductionMethod} 
+            <EmbeddingPlot
+              selectedMethod={reductionMethod}
               is3D={is3D}
               onPointSelect={handlePointSelect}
               onAngleRangeSelect={handleAngleRangeSelect}
               selectedFile={selectedFile}
               selectionMode={selectionMode}
               onSelectionChange={handle2DSelectionChange}
+              externalData={
+                verificationMode && embeddingData?.reduced_embeddings
+                  ? embeddingData.reduced_embeddings.map((p): ExternalEmbeddingPoint => ({
+                      label: p.filename,
+                      coordinates: p.coordinates,
+                      color: p.color ?? '#3b82f6',
+                      hoverExtra: p.hoverExtra,
+                    }))
+                  : undefined
+              }
+              externalSelectedLabels={verificationMode ? pairSelection : undefined}
             />
           </div>
 
-          {/* Analysis Panel - Show when files are selected (2D or 3D) */}
-          {(selectedByAngle.length > 0 || selectedPoints2D.length > 0) && (
+          {/* Analysis Panel - Show when files are selected (2D or 3D); not applicable to Speaker Verification */}
+          {!verificationMode && (selectedByAngle.length > 0 || selectedPoints2D.length > 0) && (
             <div className="border border-gray-200 rounded-lg bg-white">
               <Tabs defaultValue="analysis" className="w-full">
                 <div className="border-b border-gray-200 px-4 py-2 bg-gray-50">

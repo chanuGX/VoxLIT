@@ -6,9 +6,13 @@ export interface EmbeddingPoint {
   coordinates: number[];
   embedding?: number[];
   embedding_dim?: number;
+  /** Backend-derived cluster color (Speaker Verification only). */
+  color?: string;
+  /** Extra hover line, e.g. "cluster-2 • fit 0.81" (Speaker Verification only). */
+  hoverExtra?: string;
 }
 
-interface EmbeddingData {
+export interface EmbeddingData {
   model: string;
   dataset: string;
   reduction_method: string;
@@ -21,6 +25,9 @@ interface EmbeddingData {
   reduced_embeddings?: EmbeddingPoint[];
   total_files: number;
   original_dimension: number;
+  /** From BatchProjectionResponse when set directly (Speaker Verification only). */
+  reduction_method_used?: string;
+  effective_components?: number;
 }
 
 interface EmbeddingContextType {
@@ -35,6 +42,11 @@ interface EmbeddingContextType {
     nComponents?: number
   ) => Promise<void>;
   clearEmbeddings: () => void;
+  /** Directly sets embeddingData, bypassing fetchEmbeddings/the legacy
+   *  /inferences/embeddings endpoint entirely. Used by Speaker Verification
+   *  to publish batch/project results into the same context EmbeddingPanel
+   *  already reads. */
+  setEmbeddingDataDirect: (data: EmbeddingData | null) => void;
 }
 
 const EmbeddingContext = createContext<EmbeddingContextType | undefined>(undefined);
@@ -103,6 +115,11 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setError(null);
   }, []);
 
+  const setEmbeddingDataDirect = useCallback((data: EmbeddingData | null) => {
+    setEmbeddingData(data);
+    setError(null);
+  }, []);
+
   return (
     <EmbeddingContext.Provider value={{
       embeddingData,
@@ -110,6 +127,7 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       error,
       fetchEmbeddings,
       clearEmbeddings,
+      setEmbeddingDataDirect,
     }}>
       {children}
     </EmbeddingContext.Provider>

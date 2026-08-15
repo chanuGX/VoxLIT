@@ -9,7 +9,8 @@ import { WaveformViewer } from "../audio/WaveformViewer";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
-import { UploadedFile } from '@/tasks/types';
+import { UploadedFile, DatasetRecordingRef } from '@/tasks/types';
+import { isVerificationDemoDataset } from '@/tasks/registry';
 
 interface PerturbationResult {
   perturbed_file: string;
@@ -33,6 +34,9 @@ interface DatapointEditorPanelProps {
   originalDataset?: string; // Original dataset selection from toolbar
   perturbationResult?: PerturbationResult | null;
   predictionMap?: Record<string, string>;
+  /** Speaker Verification only: the safe demo-dataset recording list, used to
+   *  resolve a selected opaque recording_id to its display_filename/extension/size. */
+  datasetRecordings?: DatasetRecordingRef[] | null;
   /**
    * Task-specific results card (from the registry's TASK_SLOTS), rendered
    * between Sample Info and Audio Playback. Receives the current
@@ -48,7 +52,8 @@ export const DatapointEditorPanel = ({
   originalDataset,
   perturbationResult,
   predictionMap,
-  renderPredictionResults
+  renderPredictionResults,
+  datasetRecordings,
 }: DatapointEditorPanelProps) => {
   const [selectedLabel, setSelectedLabel] = useState<string>("neutral");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -57,7 +62,22 @@ export const DatapointEditorPanel = ({
   const [showPerturbed, setShowPerturbed] = useState(false);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
 
+  // Speaker Verification's demo dataset has no safe way to serve audio by
+  // opaque recording_id today (resolve_recording_path is deliberately never
+  // exposed via the backend router — ground-truth safety). Show an explicit
+  // "unavailable" state instead of attempting a broken /{dataset}/file/... URL.
+  const isDemoDatasetPlayback = isVerificationDemoDataset(originalDataset) || isVerificationDemoDataset(dataset);
+
+  // Resolve the selected opaque recording_id against the safe recording list
+  // already returned by GET /tasks/verification/dataset/recordings — never
+  // fetches anything itself, and never exposes ground truth.
+  const demoRecording = isDemoDatasetPlayback && selectedFile
+    ? datasetRecordings?.find((r) => r.recording_id === selectedFile.file_id) ?? null
+    : null;
+
   const audioUrl = (() => {
+    if (isDemoDatasetPlayback) return undefined;
+
     // If showing perturbed audio and it's available
     if (showPerturbed && perturbationResult?.success) {
       const filename = perturbationResult.filename;
@@ -111,20 +131,35 @@ export const DatapointEditorPanel = ({
         filename: perturbationResult.filename,
         duration: perturbationResult.duration_ms / 1000,
         sample_rate: perturbationResult.sample_rate,
-        size: undefined
+        size: undefined,
+        extension: undefined,
       };
     }
-    
+
+    // Demo-dataset selections: only the safe fields the backend actually
+    // returns (display_filename/extension/size_bytes) — no duration/sample
+    // rate, since no audio bytes are ever fetched for this dataset.
+    if (demoRecording) {
+      return {
+        filename: demoRecording.display_filename,
+        duration: undefined,
+        sample_rate: undefined,
+        size: demoRecording.size_bytes,
+        extension: demoRecording.extension,
+      };
+    }
+
     // For original file, try to get the most accurate data
     if (selectedFile) {
       return {
         filename: selectedFile.filename,
         duration: selectedFile.duration || undefined,
         sample_rate: selectedFile.sample_rate || undefined,
-        size: selectedFile.size || undefined
+        size: selectedFile.size || undefined,
+        extension: undefined,
       };
     }
-    
+
     return null;
   })();
 
@@ -239,23 +274,29 @@ export const DatapointEditorPanel = ({
             <div className="text-xs-tight">
               <span className="text-gray-500">Duration:</span>
               <span className="ml-2 text-gray-700">
-                {currentFileInfo?.duration 
-                  ? `${currentFileInfo.duration.toFixed(1)}s` 
-                  : audioMetadata.duration 
-                  ? `${audioMetadata.duration.toFixed(1)}s` 
-                  : "Loading..."}
+                {currentFileInfo?.duration
+                  ? `${currentFileInfo.duration.toFixed(1)}s`
+                  : audioMetadata.duration
+                  ? `${audioMetadata.duration.toFixed(1)}s`
+                  : demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             <div className="text-xs-tight">
               <span className="text-gray-500">Sample Rate:</span>
               <span className="ml-2 text-gray-700">
-                {currentFileInfo?.sample_rate 
-                  ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz` 
-                  : audioMetadata.sampleRate 
-                  ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz` 
-                  : "Loading..."}
+                {currentFileInfo?.sample_rate
+                  ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz`
+                  : audioMetadata.sampleRate
+                  ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz`
+                  : demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
+            {currentFileInfo?.extension && (
+              <div className="text-xs-tight">
+                <span className="text-gray-500">Extension:</span>
+                <span className="ml-2 text-gray-700">{currentFileInfo.extension}</span>
+              </div>
+            )}
             {currentFileInfo?.size && (
               <div className="text-xs-tight">
                 <span className="text-gray-500">Size:</span>
@@ -306,15 +347,22 @@ export const DatapointEditorPanel = ({
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-2.5">
-            <WaveformViewer 
+            {isDemoDatasetPlayback ? (
+              <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
+                <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
+                Playback unavailable for demo dataset
+              </div>
+            ) : (
+              <>
+            <WaveformViewer
               audioUrl={audioUrl}
               isPlaying={isPlaying}
               onReady={(wavesurfer) => {
-      
+
                 wavesurferRef.current = wavesurfer;
                 const duration = wavesurfer.getDuration();
                 setDuration(duration);
-                
+
                 // Update metadata state for file info display
                 setAudioMetadata({
                   duration: duration,
@@ -337,7 +385,7 @@ export const DatapointEditorPanel = ({
                 wavesurferRef.current?.seekTo(0);
               }}
             />
-            <AudioPlayer 
+            <AudioPlayer
               isPlaying={isPlaying}
               onPlayPause={() => {
                 setIsPlaying(!isPlaying);
@@ -362,6 +410,8 @@ export const DatapointEditorPanel = ({
                 }
               }}
             />
+              </>
+            )}
           </CardContent>
         </Card>
       </div>

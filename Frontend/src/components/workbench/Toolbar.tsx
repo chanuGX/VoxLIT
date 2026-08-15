@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import {
   Select,
@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from "@/components/ui/tooltip";
 import { Upload, HelpCircle } from "lucide-react";
+import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
 import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
 import { TaskDefinition, UploadedFile } from '@/tasks/types';
@@ -25,6 +26,9 @@ interface ToolbarProps {
   dataset: string;
   setDataset: (dataset: string) => void;
   onBatchInference?: (model: string, dataset: string) => void;
+  /** Single upload entry point — also used by AudioDatasetPanel's own
+   *  (hideable) uploader so both feed the same shared uploadedFiles state. */
+  onUploadSuccess?: (uploadResponse: UploadedFile, rawFile?: File) => void;
 }
 
 interface CustomDataset {
@@ -37,8 +41,58 @@ interface CustomDataset {
  * Registry-driven toolbar: model and dataset dropdowns come from the task
  * definition in src/tasks/registry.tsx — never hardcode options here.
  */
-export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference }: ToolbarProps) => {
+export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, onUploadSuccess }: ToolbarProps) => {
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const uploadFile = async (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('model', model);
+
+    try {
+      const response = await fetch(`${API_BASE}/upload`, {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Upload failed');
+      }
+      const data = await response.json();
+      toast.success(`Uploaded: ${file.name}`);
+      onUploadSuccess?.(data, file);
+    } catch (error) {
+      console.error('Upload error:', error);
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      toast.error(`Failed to upload ${file.name}: ${msg}`);
+    }
+  };
+
+  const handleFileInputChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files) {
+      const allowedExtensions = ['.wav', '.mp3', '.m4a', '.flac'];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const fileExtension = file.name.toLowerCase().substring(file.name.lastIndexOf('.'));
+        const isValidFile = file.type.startsWith('audio/') || allowedExtensions.includes(fileExtension);
+        if (isValidFile) {
+          await uploadFile(file);
+        } else {
+          toast.error(`Invalid file type: ${file.name}. Supported formats: WAV, MP3, M4A, FLAC`);
+        }
+      }
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
   const fetchCustomDatasets = async () => {
     try {
@@ -236,7 +290,7 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
 
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="default" size="sm" className="h-7 text-xs shadow-aws-sm">
+              <Button variant="default" size="sm" className="h-7 text-xs shadow-aws-sm" onClick={handleUploadClick}>
                 <Upload className="h-3.5 w-3.5 mr-1.5" />
                 Upload
               </Button>
@@ -245,6 +299,14 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
               <p>Upload audio files for analysis</p>
             </TooltipContent>
           </Tooltip>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="audio/*,.flac,.wav,.mp3,.m4a"
+            multiple
+            onChange={handleFileInputChange}
+            className="hidden"
+          />
         </div>
       </div>
     </TooltipProvider>

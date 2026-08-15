@@ -9,7 +9,8 @@ import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
-import { BUILTIN_DATASET_IDS } from '@/tasks/registry';
+import { BUILTIN_DATASET_IDS, isVerificationDemoDataset } from '@/tasks/registry';
+import type { DatasetRecordingRef } from '@/tasks/types';
 
 interface UploadedFile {
   file_id: string;
@@ -30,13 +31,23 @@ interface AudioDatasetPanelProps {
   uploadedFiles?: UploadedFile[];
   selectedFile?: UploadedFile | null;
   onFileSelect?: (file: UploadedFile) => void;
-  onUploadSuccess?: (uploadResponse: UploadedFile) => void;
+  onUploadSuccess?: (uploadResponse: UploadedFile, rawFile?: File) => void;
   batchInferenceStatus?: 'idle' | 'running' | 'done';
   onBatchInferenceStart?: () => void;
   onBatchInferenceComplete?: () => void;
   onAvailableFilesChange?: (files: string[]) => void;
   onPredictionUpdate?: (fileId: string, prediction: string) => void;
   predictionMap?: Record<string, string>;
+  /** Verification-only: hides this panel's own Upload button/dropzone so the
+   *  top-bar Upload button is the single visible upload entry point. */
+  hideUploadControl?: boolean;
+  /** Verification-only: swaps the table into safe-columns, multi-select mode. */
+  selectionVariant?: 'default' | 'verification';
+  checkedIds?: string[];
+  onCheckedIdsChange?: (ids: string[]) => void;
+  /** Verification-only: receives the raw safe recording list whenever the
+   *  demo dataset's metadata is (re)loaded via the safe endpoint. */
+  onVerificationRecordingsChange?: (recordings: DatasetRecordingRef[]) => void;
 }
 
 export const AudioDatasetPanel = ({ 
@@ -52,7 +63,12 @@ export const AudioDatasetPanel = ({
   onBatchInferenceComplete,
   onAvailableFilesChange,
   onPredictionUpdate,
-  predictionMap: externalPredictionMap
+  predictionMap: externalPredictionMap,
+  hideUploadControl = false,
+  selectionVariant = 'default',
+  checkedIds,
+  onCheckedIdsChange,
+  onVerificationRecordingsChange,
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -166,6 +182,8 @@ export const AudioDatasetPanel = ({
     
     // Skip batch inference for legacy "custom" (uploaded files) but allow for custom datasets
     if (dataset === "custom" || !model) return;
+    // Verification has no legacy resultKind/inference concept — never hits /inferences/*.
+    if (isVerificationDemoDataset(originalDataset || dataset)) return;
     if (datasetMetadata.length === 0) return;
     
     const datasetToUse = originalDataset || dataset;
@@ -378,29 +396,47 @@ export const AudioDatasetPanel = ({
   // Cleanup on unmount or when dataset changes
   // Reload function to refresh dataset metadata
   const handleReloadDataset = useCallback(async () => {
-    const allowed = BUILTIN_DATASET_IDS;
     const datasetToUse = originalDataset || dataset;
+
+    if (isVerificationDemoDataset(datasetToUse)) {
+      try {
+        const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { credentials: 'include' });
+        if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
+        const data = await res.json() as { recordings: DatasetRecordingRef[] };
+        const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes }));
+        setDatasetMetadata(rows);
+        onAvailableFilesChange?.(rows.map(r => r.filename));
+        onVerificationRecordingsChange?.(data.recordings);
+        toast.success("Dataset reloaded successfully");
+      } catch (error) {
+        console.error('Failed to reload demo dataset:', error);
+        toast.error("Failed to reload dataset");
+      }
+      return;
+    }
+
+    const allowed = BUILTIN_DATASET_IDS;
     if (!allowed.includes(datasetToUse)) {
       setDatasetMetadata([]);
       return;
     }
-    
+
     try {
       const res = await fetch(`${API_BASE}/${dataset}/metadata`, { credentials: 'include' });
       if (!res.ok) throw new Error(`Failed to fetch metadata: ${res.status}`);
       const data = await res.json();
       if (Array.isArray(data)) {
         setDatasetMetadata(data as Record<string, string | number>[]);
-        
+
         // Extract filenames for embeddings
         const filenames = data.map((row: Record<string, string | number>) => {
           const pathVal = row["path"] || row["filepath"] || row["file"] || row["filename"];
-          const filename = typeof pathVal === 'string' ? 
-            (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : 
+          const filename = typeof pathVal === 'string' ?
+            (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) :
             String(pathVal);
           return filename;
         });
-        
+
         onAvailableFilesChange?.(filenames);
         toast.success("Dataset reloaded successfully");
       } else {
@@ -411,7 +447,7 @@ export const AudioDatasetPanel = ({
       console.error('Failed to reload dataset:', error);
       toast.error("Failed to reload dataset");
     }
-  }, [dataset, originalDataset, onAvailableFilesChange]);
+  }, [dataset, originalDataset, onAvailableFilesChange, onVerificationRecordingsChange]);
 
   useEffect(() => {
     abortControllerRef.current = new AbortController();
@@ -422,25 +458,47 @@ export const AudioDatasetPanel = ({
     };
   }, [model, dataset]);
 
-  // Fetch dataset metadata when originalDataset changes 
+  // Fetch dataset metadata when originalDataset changes
   useEffect(() => {
     const datasetToUse = originalDataset || dataset;
-    
+
     // Skip legacy "custom" (individual uploaded files)
     if (datasetToUse === "custom") {
       setDatasetMetadata([]);
       return;
     }
-    
+
+    // Speaker Verification's demo dataset is never safe to list via the
+    // generic /{dataset}/metadata route (ground-truth risk) — always use the
+    // task-specific, opaque-id-only endpoint instead.
+    if (isVerificationDemoDataset(datasetToUse)) {
+      const ac = new AbortController();
+      (async () => {
+        try {
+          const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { signal: ac.signal, credentials: 'include' });
+          if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
+          const data = await res.json() as { recordings: DatasetRecordingRef[] };
+          const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes }));
+          setDatasetMetadata(rows);
+          onAvailableFilesChange?.(rows.map(r => r.filename));
+          onVerificationRecordingsChange?.(data.recordings);
+        } catch (e) {
+          const name = (e as { name?: string } | null)?.name;
+          if (name !== 'AbortError') console.error(e);
+        }
+      })();
+      return () => ac.abort();
+    }
+
     // Handle both global datasets and custom datasets
     const allowed = BUILTIN_DATASET_IDS;
     const isCustomDataset = datasetToUse.startsWith('custom:');
-    
+
     if (!allowed.includes(datasetToUse) && !isCustomDataset) {
       setDatasetMetadata([]);
       return;
     }
-    
+
     const ac = new AbortController();
     (async () => {
       try {
@@ -470,7 +528,7 @@ export const AudioDatasetPanel = ({
       }
     })();
     return () => ac.abort();
-  }, [originalDataset, dataset]);
+  }, [originalDataset, dataset, onAvailableFilesChange, onVerificationRecordingsChange]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -524,11 +582,11 @@ export const AudioDatasetPanel = ({
       const data = await response.json();
       setUploadedFiles(prevFiles => [...prevFiles, data]);
       toast.success(`Uploaded: ${file.name}`);
-      
+
       if (onUploadSuccess) {
-        onUploadSuccess(data);
+        onUploadSuccess(data, file);
       }
-      
+
       return data;
     } catch (error) {
       console.error('Upload error:', error);
@@ -569,17 +627,19 @@ export const AudioDatasetPanel = ({
                   ✓ Inference Complete
                 </Badge>
               )}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={handleUploadClick}>
-                    <Upload className="h-3 w-3 mr-1" />
-                    Upload
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>Upload audio files (.wav, .mp3, .m4a, .flac)</p>
-                </TooltipContent>
-              </Tooltip>
+              {!hideUploadControl && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={handleUploadClick}>
+                      <Upload className="h-3 w-3 mr-1" />
+                      Upload
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>Upload audio files (.wav, .mp3, .m4a, .flac)</p>
+                  </TooltipContent>
+                </Tooltip>
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button size="sm" variant="secondary" className="h-7 w-7 p-0" onClick={handleReloadDataset} title="Reload dataset">
@@ -590,14 +650,16 @@ export const AudioDatasetPanel = ({
                   <p>Reload dataset metadata and refresh the file list</p>
                 </TooltipContent>
               </Tooltip>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*,.flac,.wav,.mp3,.m4a"
-              multiple
-              onChange={handleFileSelect}
-              className="hidden"
-            />
+            {!hideUploadControl && (
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*,.flac,.wav,.mp3,.m4a"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+              />
+            )}
           </div>
         </div>
         
@@ -625,7 +687,7 @@ export const AudioDatasetPanel = ({
       <div className="flex-1 min-h-0 overflow-hidden px-3 pb-3">
         <Card className="h-full rounded-lg">
           <CardContent className="p-0 h-full">
-            <AudioDataTable 
+            <AudioDataTable
               selectedRow={selectedRow}
               onRowSelect={handleRowSelect}
               searchQuery={searchQuery}
@@ -638,13 +700,16 @@ export const AudioDatasetPanel = ({
               predictionMap={predictionMap}
               inferenceStatus={inferenceStatus}
               onVisibleRowIdsChange={handleVisibleRowIdsChange}
+              selectionVariant={selectionVariant}
+              checkedIds={checkedIds}
+              onCheckedIdsChange={onCheckedIdsChange}
             />
           </CardContent>
         </Card>
       </div>
       
       {/* Upload overlay */}
-      <AudioUploader onUploadSuccess={onUploadSuccess} model={model} />
+      {!hideUploadControl && <AudioUploader onUploadSuccess={onUploadSuccess} model={model} />}
     </div>
     </TooltipProvider>
   );

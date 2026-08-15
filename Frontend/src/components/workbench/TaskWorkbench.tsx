@@ -13,6 +13,7 @@ import {
   UploadedFile,
   Wav2Vec2Prediction,
   WhisperPrediction,
+  DatasetRecordingRef,
 } from '@/tasks/types';
 import { TASK_SLOTS, getModelLabel } from '@/tasks/registry';
 
@@ -36,6 +37,35 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedEmbeddingFile, setSelectedEmbeddingFile] = useState<string | null>(null);
   const [perturbationResult, setPerturbationResult] = useState<any>(null);
+
+  // Speaker Verification-only shared state (harmless/unused for every other
+  // task, since nothing else ever sets these away from their initial values).
+  const [pairSelectionLabels, setPairSelectionLabels] = useState<string[]>([]);
+  const [uploadedRawFiles, setUploadedRawFiles] = useState<Record<string, File>>({});
+  const [datasetRecordings, setDatasetRecordings] = useState<DatasetRecordingRef[] | null>(null);
+  const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
+  const [reprojectFn, setReprojectFn] = useState<((method: string, n: number) => void) | null>(null);
+  const [labelResolverFn, setLabelResolverFn] = useState<((label: string) => string | undefined) | null>(null);
+
+  // useState's setter treats a bare function argument as a functional
+  // updater, so storing a callback value itself must go through the wrapper
+  // form — never setReprojectFn(handler) directly, since handler may itself
+  // be a function.
+  const registerReprojectHandler = useCallback((handler: ((method: string, n: number) => void) | null) => {
+    setReprojectFn(() => handler);
+  }, []);
+  const registerLabelResolver = useCallback((resolver: ((label: string) => string | undefined) | null) => {
+    setLabelResolverFn(() => resolver);
+  }, []);
+
+  // Whenever any batch-defining input changes, the current pair selection is
+  // no longer meaningful — clear it. (batchResult/projection clearing is
+  // handled by BatchAnalysisPanel itself, which is a descendant of
+  // EmbeddingProvider and can reach setEmbeddingDataDirect; TaskWorkbench
+  // itself renders that provider and cannot consume its own context.)
+  useEffect(() => {
+    setPairSelectionLabels([]);
+  }, [model, dataset, selectedBatchIds, uploadedFiles]);
 
   // Prediction state
   const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
@@ -392,13 +422,16 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
     });
   };
 
-  const handleUploadSuccess = (uploadResponse: UploadedFile) => {
+  const handleUploadSuccess = (uploadResponse: UploadedFile, rawFile?: File) => {
     setUploadedFiles(prev => {
       const newFiles = [...prev, uploadResponse];
       return newFiles;
     });
     // Always select the newly uploaded file
     setSelectedFile(uploadResponse);
+    if (rawFile) {
+      setUploadedRawFiles(prev => ({ ...prev, [uploadResponse.file_id]: rawFile }));
+    }
   };
 
   const handleFileSelection = (file: UploadedFile) => {
@@ -408,11 +441,17 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   };
 
   const handleEmbeddingSelection = (filename: string) => {
-    setSelectedEmbeddingFile(filename);
+    // Speaker Verification's graph reports backend labels (upload-000,
+    // rec_<hash>, ...), never real filenames — translate through the
+    // index-aligned resolver BatchAnalysisPanel registered before this ever
+    // reaches selectedFile/Datapoint-Editor/Audio-Playback state.
+    const resolvedId = task.id === 'verification' ? labelResolverFn?.(filename) : undefined;
+    const effectiveId = resolvedId ?? filename;
+
+    setSelectedEmbeddingFile(effectiveId);
 
     // Try to find and select corresponding file in audio dataset
-    // First check uploaded files
-    const matchingUploadedFile = uploadedFiles.find(f => f.filename === filename);
+    const matchingUploadedFile = uploadedFiles.find(f => f.file_id === effectiveId || f.filename === effectiveId);
     if (matchingUploadedFile) {
       setSelectedFile(matchingUploadedFile);
       return;
@@ -421,9 +460,9 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
     // For dataset files, create a file-like object for the UI
     // The AudioDatasetPanel should handle highlighting the corresponding row
     const fileLike: UploadedFile = {
-      file_id: filename,
-      filename: filename,
-      file_path: filename,
+      file_id: effectiveId,
+      filename: effectiveId,
+      file_path: effectiveId,
       message: "Selected from embeddings"
     };
     setSelectedFile(fileLike);
@@ -533,6 +572,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
           dataset={dataset}
           setDataset={setDataset}
           onBatchInference={handleBatchInference}
+          onUploadSuccess={handleUploadSuccess}
         />
 
         {/* Main Content Area */}
@@ -547,6 +587,10 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 availableFiles={availableFiles}
                 selectedFile={selectedEmbeddingFile}
                 onFileSelect={handleEmbeddingSelection}
+                verificationMode={task.id === 'verification'}
+                pairSelection={pairSelectionLabels}
+                onPairSelectionChange={setPairSelectionLabels}
+                onReproject={reprojectFn}
               />
             </Panel>
 
@@ -560,6 +604,21 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                     <WorkbenchCenter
                       model={model}
                       modelLabel={getModelLabel(task, model)}
+                      dataset={effectiveDataset}
+                      originalDataset={dataset}
+                      availableFiles={availableFiles}
+                      uploadedFiles={uploadedFiles}
+                      uploadedRawFiles={uploadedRawFiles}
+                      selectedFile={selectedFile}
+                      selectedEmbeddingFile={selectedEmbeddingFile}
+                      onFileSelect={handleFileSelection}
+                      pairSelection={pairSelectionLabels}
+                      onClearPairSelection={() => setPairSelectionLabels([])}
+                      datasetRecordings={datasetRecordings}
+                      selectedBatchIds={selectedBatchIds}
+                      onSelectedBatchIdsChange={setSelectedBatchIds}
+                      onReprojectHandlerChange={registerReprojectHandler}
+                      onLabelResolverChange={registerLabelResolver}
                     />
                   ) : task.status === "active" ? (
                     <ExplainabilityPanel
@@ -596,6 +655,11 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                     onAvailableFilesChange={setAvailableFiles}
                     onPredictionUpdate={handlePredictionUpdate}
                     predictionMap={predictionMap}
+                    hideUploadControl={task.id === 'verification'}
+                    selectionVariant={task.id === 'verification' ? 'verification' : 'default'}
+                    checkedIds={selectedBatchIds}
+                    onCheckedIdsChange={setSelectedBatchIds}
+                    onVerificationRecordingsChange={setDatasetRecordings}
                   />
                 </Panel>
               </PanelGroup>
@@ -613,6 +677,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 perturbationResult={perturbationResult}
                 predictionMap={predictionMap}
                 renderPredictionResults={renderPredictionResults}
+                datasetRecordings={datasetRecordings}
               />
             </Panel>
           </PanelGroup>

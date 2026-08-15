@@ -7,6 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ZoomIn, ZoomOut, RotateCcw, Layers3, Target } from "lucide-react";
 
+export interface ExternalEmbeddingPoint {
+  label: string;
+  coordinates: number[];
+  color: string;
+  hoverExtra?: string;
+}
+
 interface EmbeddingPlotProps {
   selectedMethod?: string;
   is3D?: boolean;
@@ -15,6 +22,8 @@ interface EmbeddingPlotProps {
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
   onSelectionChange?: (selectedFiles: string[]) => void;
+  externalData?: ExternalEmbeddingPoint[];
+  externalSelectedLabels?: string[];
 }
 
 type PlaneType = 'none' | 'xy' | 'xz' | 'yz';
@@ -28,10 +37,13 @@ interface EmbeddingPlotContentProps {
   selectedFile?: string | null;
   selectionMode?: 'box' | 'lasso';
   onSelectionChange?: (selectedFiles: string[]) => void;
+  externalData?: ExternalEmbeddingPoint[];
+  externalSelectedLabels?: string[];
 }
 
-const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotContentProps) => {
+const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels }: EmbeddingPlotContentProps) => {
   const { embeddingData, isLoading, error } = useEmbedding();
+  const isExternal = externalData !== undefined;
   const plotRef = useRef<any>(null);
   const [selectedPlane, setSelectedPlane] = useState<PlaneType>('none');
   const [angleMin, setAngleMin] = useState<number>(40);
@@ -68,12 +80,16 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   const handlePointClick = useCallback((event: any) => {
     if (event.points && event.points.length > 0) {
       const point = event.points[0];
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const filename = point.customdata[0];
+      // Use customdata[0] which contains the raw filename/label (not the HTML-formatted text).
+      // Traces with no customdata (origin, plane, connector) must not be treated as selectable points.
+      const label = point.customdata?.[0];
+      if (label === undefined) {
+        return;
+      }
       const coordinates = is3D ? [point.x, point.y, point.z] : [point.x, point.y];
-      
+
       if (onPointSelect) {
-        onPointSelect(filename, coordinates);
+        onPointSelect(label, coordinates);
       }
     }
   }, [onPointSelect, is3D]);
@@ -81,8 +97,11 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Handle 2D box/lasso selection
   const handleSelection = useCallback((event: any) => {
     if (!is3D && onSelectionChange && event?.points) {
-      // Use customdata[0] which contains the raw filename (not the HTML-formatted text)
-      const selected = event.points.map((p: any) => p.customdata[0]);
+      // Use customdata[0] which contains the raw filename/label (not the HTML-formatted text).
+      // Points from traces with no customdata (origin, plane, connector) are excluded.
+      const selected = event.points
+        .filter((p: any) => p.customdata?.[0] !== undefined)
+        .map((p: any) => p.customdata[0]);
       onSelectionChange(selected);
     }
   }, [is3D, onSelectionChange]);
@@ -96,6 +115,18 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
 
   // Use real embedding data if available, otherwise fall back to mock data
   const getPlotData = () => {
+    if (isExternal) {
+      const points = externalData!;
+      const x = points.map(point => point.coordinates[0]);
+      const y = points.map(point => point.coordinates[1]);
+      const z = is3D && points.length > 0 && points[0].coordinates.length > 2
+        ? points.map(point => point.coordinates[2])
+        : undefined;
+      const text = points.map(point => point.label);
+      const colors = points.map(point => point.color);
+      return { x, y, z, colors, text };
+    }
+
     if (embeddingData && embeddingData.reduced_embeddings && embeddingData.reduced_embeddings.length > 0) {
       const x = embeddingData.reduced_embeddings.map(point => point.coordinates[0]);
       const y = embeddingData.reduced_embeddings.map(point => point.coordinates[1]);
@@ -241,23 +272,36 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return 90 - angleToNormal;
   };
 
+  // Single generic point source for the plane/angle tool: external batch points when
+  // present, otherwise the context-driven embedding points. Keeps the plane/angle
+  // geometry and controls identical for both internal and external callers.
+  const activePoints = useMemo(() => {
+    if (externalData) {
+      return externalData.map(point => ({ label: point.label, coordinates: point.coordinates }));
+    }
+    if (embeddingData?.reduced_embeddings) {
+      return embeddingData.reduced_embeddings.map(point => ({ label: point.filename, coordinates: point.coordinates }));
+    }
+    return [];
+  }, [externalData, embeddingData]);
+
   // Select points based on angle range - memoized to prevent unnecessary recalculations
   const selectedFiles = useMemo(() => {
-    if (!is3D || selectedPlane === 'none' || !embeddingData?.reduced_embeddings) {
+    if (!is3D || selectedPlane === 'none' || activePoints.length === 0) {
       return [];
     }
 
-    return embeddingData.reduced_embeddings
+    return activePoints
       .filter(point => {
         if (point.coordinates.length < 3) return false;
-        
+
         const [x, y, z] = point.coordinates;
         const angle = calculateAngleToPlane(x, y, z, selectedPlane);
-        
+
         return angle >= angleMin && angle <= angleMax;
       })
-      .map(point => point.filename);
-  }, [is3D, selectedPlane, embeddingData, angleMin, angleMax]);
+      .map(point => point.label);
+  }, [is3D, selectedPlane, activePoints, angleMin, angleMax]);
 
   // Update selected points when calculated files change
   useEffect(() => {
@@ -280,7 +324,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     z: z && z.length > 0 ? [Math.min(...z) * 1.1, Math.max(...z) * 1.1] as [number, number] : [0, 0] as [number, number]
   } : { x: [0, 0] as [number, number], y: [0, 0] as [number, number], z: [0, 0] as [number, number] };
 
-  if (isLoading) {
+  if (!isExternal && isLoading) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="text-xs text-muted-foreground flex items-center gap-2">
@@ -291,7 +335,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     );
   }
 
-  if (error) {
+  if (!isExternal && error) {
     return (
       <div className="h-full flex items-center justify-center p-4">
         <div className="text-xs text-red-500 text-center">
@@ -304,21 +348,34 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
 
   // Create marker sizes based on selection
   const markerSizes = text.map(filename => {
+    if (isExternal) {
+      return externalSelectedLabels?.includes(filename) ? 12 : 8;
+    }
     if (selectedFile === filename) return 12; // Currently selected file (medium-large)
     if (selectedByAngle.includes(filename)) return 8; // Angle range selected (medium)
     return 6; // Default (smaller)
   });
 
   // Create marker colors based on selection
-  const markerColors = text.map(filename => {
+  const markerColors = text.map((filename, index) => {
+    if (isExternal) {
+      // Selection gold always wins over the backend-provided cluster color,
+      // matching the existing priority rule below.
+      return externalSelectedLabels?.includes(filename) ? '#FFD700' : externalData![index].color;
+    }
     if (selectedFile === filename) return '#FFD700'; // Gold for selected file
     if (selectedByAngle.includes(filename)) return '#ef4444'; // Red for angle selected
     return '#3b82f6'; // Blue for all other points
   });
 
   // Create marker opacities based on selection
-  const hasSelection = selectedFile || selectedByAngle.length > 0;
+  const hasSelection = isExternal
+    ? (externalSelectedLabels?.length ?? 0) > 0
+    : selectedFile || selectedByAngle.length > 0;
   const markerOpacities = text.map(filename => {
+    if (isExternal) {
+      return externalSelectedLabels?.includes(filename) ? 1.0 : 0.85;
+    }
     if (!hasSelection) return 0.8; // Default opacity when no selection
     if (selectedFile === filename) return 1.0; // Full opacity for selected file
     if (selectedByAngle.includes(filename)) return 0.9; // High opacity for angle selected
@@ -332,7 +389,11 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Create hover text with angle information
   const hoverText = text.map((filename, index) => {
     let baseText = `<b>${filename}</b>`;
-    
+
+    if (isExternal && externalData![index].hoverExtra) {
+      baseText += `<br>${externalData![index].hoverExtra}`;
+    }
+
     // Add angle information if this point is selected by angle range and in 3D mode
     if (is3D && selectedPlane !== 'none' && selectedByAngle.includes(filename) && z) {
       const [px, py, pz] = [x[index], y[index], z[index]];
@@ -340,7 +401,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       baseText += `<br>Angle: ${angle.toFixed(1)}°`;
       baseText += `<br>Plane: ${selectedPlane.toUpperCase()}`;
     }
-    
+
     return baseText;
   });
 
@@ -361,7 +422,8 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       opacity: markerOpacities // Use dynamic opacity array
     },
     text: hoverText,
-    customdata: text.map((filename, index) => [filename, colors[index]]), // Store [filename, color] for each point
+    // Store [filename/label, color] for each point
+    customdata: text.map((filename, index) => [filename, isExternal ? externalData![index].color : colors[index]]),
   };
 
   // Add Z coordinate for 3D plots
@@ -401,6 +463,30 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   }
 
   traces.push(originTrace);
+
+  // Connect the two externally-selected points (pair comparison). No customdata is set,
+  // so this trace is excluded from click/box-select and from the plane/angle point source.
+  if (isExternal && externalData && externalSelectedLabels?.length === 2) {
+    const [labelA, labelB] = externalSelectedLabels;
+    const pointA = externalData.find(point => point.label === labelA);
+    const pointB = externalData.find(point => point.label === labelB);
+    if (pointA && pointB) {
+      const connectorTrace: any = {
+        x: [pointA.coordinates[0], pointB.coordinates[0]],
+        y: [pointA.coordinates[1], pointB.coordinates[1]],
+        mode: 'lines',
+        type: is3D ? 'scatter3d' : 'scatter',
+        line: { color: '#6b7280', width: 2, dash: 'dot' },
+        hoverinfo: 'skip',
+        showlegend: false,
+        name: 'Pair connector',
+      };
+      if (is3D) {
+        connectorTrace.z = [pointA.coordinates[2], pointB.coordinates[2]];
+      }
+      traces.push(connectorTrace);
+    }
+  }
 
   // Add plane if selected and in 3D mode
   if (is3D && selectedPlane !== 'none') {
@@ -493,9 +579,10 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   }
 
   // Add compact annotation
-  if (embeddingData) {
+  if (embeddingData || isExternal) {
+    const fileCount = isExternal ? (externalData?.length ?? 0) : embeddingData!.total_files;
     layout.annotations = [{
-      text: `${embeddingData.total_files} files • ${is3D ? '3D' : '2D'}`,
+      text: `${fileCount} files • ${is3D ? '3D' : '2D'}`,
       xref: 'paper',
       yref: 'paper',
       x: 0.02,
@@ -615,7 +702,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   );
 };
 
-export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange }: EmbeddingPlotProps) => {
+export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels }: EmbeddingPlotProps) => {
   return (
     <div className="w-full h-full min-h-0 relative">
       <EmbeddingPlotContent
@@ -626,6 +713,8 @@ export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSel
         selectedFile={selectedFile}
         selectionMode={selectionMode}
         onSelectionChange={onSelectionChange}
+        externalData={externalData}
+        externalSelectedLabels={externalSelectedLabels}
       />
     </div>
   );

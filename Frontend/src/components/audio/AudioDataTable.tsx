@@ -10,6 +10,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Play, ChevronLeft, ChevronRight } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 
@@ -48,9 +49,15 @@ interface AudioDataTableProps {
   predictionMap?: Record<string, string>;
   inferenceStatus?: Record<string, 'idle' | 'loading' | 'done' | 'error'>;
   onVisibleRowIdsChange?: (rowIds: string[]) => void;
+  /** 'verification' swaps in a safe-columns-only, multi-select table (no
+   *  Ground Truth/Predicted Label/Confidence). Default (undefined) is
+   *  byte-identical to today for every other task. */
+  selectionVariant?: 'default' | 'verification';
+  checkedIds?: string[];
+  onCheckedIdsChange?: (ids: string[]) => void;
 }
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange }: AudioDataTableProps) => {
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, selectionVariant = 'default', checkedIds, onCheckedIdsChange }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -210,6 +217,69 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       },
     },
   ], [model, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, getFrom]);
+
+  // Safe, verification-only columns: no Ground Truth / Predicted Label / Confidence
+  // — those column defs simply don't exist in this branch. A leading checkbox
+  // toggles batch-input membership, independent of the existing row-click preview.
+  const verificationColumns: ColumnDef<unknown, unknown>[] = useMemo(() => [
+    {
+      id: "select",
+      header: "",
+      cell: ({ row }) => {
+        const rowId = row.id as string;
+        const checked = checkedIds?.includes(rowId) ?? false;
+        return (
+          <div onClick={(e) => e.stopPropagation()}>
+            <Checkbox
+              checked={checked}
+              onCheckedChange={(value) => {
+                if (!onCheckedIdsChange) return;
+                const current = checkedIds ?? [];
+                onCheckedIdsChange(value ? [...current, rowId] : current.filter((id) => id !== rowId));
+              }}
+            />
+          </div>
+        );
+      },
+    },
+    {
+      id: "filename",
+      header: "Filename / Recording ID",
+      cell: ({ row }) => {
+        if ('file_id' in (row.original as any)) {
+          const data = row.original as AudioData;
+          return <span className="font-mono text-xs">{data.filename}</span>;
+        }
+        const data = row.original as DatasetRow;
+        const path = getFrom(data, ["path", "filepath", "file", "filename"], "");
+        const filename = path.split("/").pop() || path;
+        return <span className="font-mono text-xs">{filename}</span>;
+      },
+    },
+    {
+      id: "extension",
+      header: "Extension",
+      cell: ({ row }) => {
+        if ('file_id' in (row.original as any)) {
+          return <span className="text-xs text-muted-foreground">—</span>;
+        }
+        const data = row.original as DatasetRow;
+        return <span className="text-xs text-muted-foreground">{getFrom(data, ["extension"], "")}</span>;
+      },
+    },
+    {
+      id: "size",
+      header: "Size",
+      cell: ({ row }) => {
+        const isUpload = 'file_id' in (row.original as any);
+        const sizeBytes = isUpload
+          ? (row.original as AudioData).size
+          : Number(getFrom(row.original as DatasetRow, ["size_bytes", "size"], "0")) || undefined;
+        if (!sizeBytes) return <span className="text-xs text-muted-foreground">—</span>;
+        return <span className="text-xs text-muted-foreground">{(sizeBytes / 1024).toFixed(1)} KB</span>;
+      },
+    },
+  ], [checkedIds, onCheckedIdsChange, getFrom]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["id"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["filename"];
@@ -384,6 +454,9 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   }, [hasDatasetMetadata, hasUploadedFiles, datasetRows, customTableData]);
   const columns: ColumnDef<unknown, unknown>[] = useMemo(
     () => {
+      if (selectionVariant === 'verification') {
+        return verificationColumns;
+      }
       if (hasUploadedFiles) {
         // When showing combined data, use custom columns that can handle both types
         return customColumns;
@@ -391,7 +464,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       // When no uploaded files, use original logic
       return hasDatasetMetadata ? (dataset === "ravdess" ? datasetColumnsRavdess : datasetColumnsCommonVoice) : customColumns;
     },
-    [hasUploadedFiles, hasDatasetMetadata, dataset, datasetColumnsRavdess, datasetColumnsCommonVoice, customColumns]
+    [selectionVariant, verificationColumns, hasUploadedFiles, hasDatasetMetadata, dataset, datasetColumnsRavdess, datasetColumnsCommonVoice, customColumns]
   );
 
   const getRowId = useCallback((row: unknown, index?: number) => {

@@ -1,5 +1,5 @@
 import React from "react";
-import { TaskDefinition, TaskId, PredictionResultsProps } from "./types";
+import { TaskDefinition, TaskId, PredictionResultsProps, WorkbenchCenterProps } from "./types";
 import { TranscriptionResults } from "@/features/transcription/TranscriptionResults";
 import { ClassificationResults } from "@/features/emotion/ClassificationResults";
 import { SpeakerVerificationWorkbench } from "@/features/verification";
@@ -88,7 +88,7 @@ export const TASKS: TaskDefinition[] = [
       { id: "resnet34-lm", label: "WeSpeaker ResNet34-LM", available: true },
     ],
     defaultModel: "ecapa-tdnn",
-    datasets: [{ id: "voxceleb1-indian-demo", label: "VoxCeleb1 Indian (Demo)", available: false }],
+    datasets: [{ id: "voxceleb1-indian-demo", label: "VoxCeleb1 Indian (Demo)", available: true }],
     defaultDataset: null,
     allowCustomDatasets: false,
     capabilities: {
@@ -153,6 +153,18 @@ export const BUILTIN_DATASET_IDS: string[] = Array.from(
   )
 );
 
+/**
+ * The Speaker Verification demo dataset id. Its `/{dataset}/metadata` +
+ * `/inferences/*` generic routes must NEVER be used (ground-truth safety —
+ * see Backend/app/tasks/verification/dataset.py's module docstring). Panels
+ * that would otherwise treat any BUILTIN_DATASET_IDS member generically must
+ * special-case this id and route through `/tasks/verification/dataset/recordings`
+ * instead.
+ */
+export const VERIFICATION_DEMO_DATASET_ID = "voxceleb1-indian-demo";
+export const isVerificationDemoDataset = (datasetId?: string | null): boolean =>
+  datasetId === VERIFICATION_DEMO_DATASET_ID;
+
 /** Label for a model id within a task (falls back to the raw id). */
 export const getModelLabel = (task: TaskDefinition, modelId: string): string =>
   task.models.find((m) => m.id === modelId)?.label ?? modelId;
@@ -166,7 +178,7 @@ export const TASK_SLOTS: Record<
   TaskId,
   {
     PredictionResults?: React.ComponentType<PredictionResultsProps>;
-    WorkbenchCenter?: React.ComponentType<{ model: string; modelLabel: string }>;
+    WorkbenchCenter?: React.ComponentType<WorkbenchCenterProps>;
   }
 > = {
   transcription: { PredictionResults: TranscriptionResults },

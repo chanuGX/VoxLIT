@@ -6,11 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BatchAnalysisPanel } from "./BatchAnalysisPanel";
+import type { WorkbenchCenterProps } from "@/tasks/types";
 
-interface SpeakerVerificationWorkbenchProps {
-  model: string;
-  modelLabel: string;
-}
+type SpeakerVerificationWorkbenchProps = WorkbenchCenterProps;
 
 interface ReferenceScore {
   reference_index: number;
@@ -58,6 +58,13 @@ const formatScore = (value: number) => value.toFixed(4);
 export const SpeakerVerificationWorkbench = ({
   model,
   modelLabel,
+  dataset,
+  originalDataset,
+  uploadedRawFiles,
+  selectedBatchIds,
+  pairSelection,
+  onReprojectHandlerChange,
+  onLabelResolverChange,
 }: SpeakerVerificationWorkbenchProps) => {
   const [enrollmentFiles, setEnrollmentFiles] = useState<File[]>([]);
   const [probeFile, setProbeFile] = useState<File | null>(null);
@@ -168,6 +175,13 @@ export const SpeakerVerificationWorkbench = ({
           </p>
         </div>
 
+        <Tabs defaultValue="pair-verification" className="w-full">
+          <TabsList>
+            <TabsTrigger value="pair-verification">Pair Verification</TabsTrigger>
+            <TabsTrigger value="batch-analysis">Batch Analysis</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="pair-verification" className="space-y-4">
         <div className="grid gap-4 md:grid-cols-2">
           <Card>
             <CardHeader>
@@ -322,6 +336,22 @@ export const SpeakerVerificationWorkbench = ({
             </Card>
           </div>
         )}
+          </TabsContent>
+
+          <TabsContent value="batch-analysis" forceMount className="space-y-4 data-[state=inactive]:hidden">
+            <BatchAnalysisPanel
+              model={model}
+              modelLabel={modelLabel}
+              dataset={dataset}
+              originalDataset={originalDataset}
+              uploadedRawFiles={uploadedRawFiles}
+              selectedBatchIds={selectedBatchIds}
+              pairSelection={pairSelection}
+              onReprojectHandlerChange={onReprojectHandlerChange}
+              onLabelResolverChange={onLabelResolverChange}
+            />
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
   );
