@@ -107,8 +107,8 @@ export const TASKS: TaskDefinition[] = [
     status: "placeholder",
     models: [{ id: "task-b-model-1", label: "Model (to be added)", available: false }],
     defaultModel: null,
-    datasets: [{ id: "task-b-dataset-1", label: "Dataset (to be added)", available: false }],
-    defaultDataset: null,
+    datasets: [{ id: "ami-subset", label: "AMI Meetings (3-file subset)", available: true }],
+    defaultDataset: "ami-subset",
     allowCustomDatasets: true,
     capabilities: {
       saliency: false,

@@ -36,10 +36,10 @@ TASKS: dict[str, dict] = {
         "datasets": ["voxceleb1-indian-demo"],
     },
     "task-b": {
-        "name": "Voice Task B",
-        "status": "placeholder",
-        "models": [],
-        "datasets": [],
+        "name": "Speaker Diarization",
+        "status": "active",
+        "models": ["pyannote-3.1"],
+        "datasets": ["ami-subset"],
     },
     "task-c": {
         "name": "Voice Task C",
