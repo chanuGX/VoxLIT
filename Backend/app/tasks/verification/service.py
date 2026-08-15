@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torchaudio
 
 from app.core.settings import settings
+from app.tasks.verification import clustering
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +329,7 @@ def batch_verification_analysis(
     embeddings = extract_batch_embeddings(model_key, audio_paths)
     similarity = pairwise_similarity_matrix(embeddings)
     decisions = pairwise_decision_matrix(similarity, spec.threshold)
+    cluster_result = clustering.cluster_batch(model_key, similarity, labels)
 
     return {
         "model": spec.key,
@@ -339,6 +341,7 @@ def batch_verification_analysis(
         "embeddings": embeddings.tolist(),
         "similarity_matrix": similarity.tolist(),
         "decision_matrix": decisions.tolist(),
+        **cluster_result,
     }
 
 

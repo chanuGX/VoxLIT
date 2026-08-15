@@ -122,7 +122,7 @@ def test_batch_verification_analysis_returns_expected_contract(monkeypatch):
     monkeypatch.setattr(service, "get_model", lambda _: _FakeAdapter(embeddings))
 
     result = service.batch_verification_analysis(
-        "test-model", ["a.wav", "b.wav", "c.wav"], ["l0", "l1", "l2"]
+        "ecapa-tdnn", ["a.wav", "b.wav", "c.wav"], ["l0", "l1", "l2"]
     )
 
     assert result["model"] == "test-model"
