@@ -4,9 +4,75 @@ import os
 import uuid
 import librosa
 import numpy as np
+import multiprocessing
+import tempfile
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from .dataset_service import resolve_file
+
+# Explicit spawn context on every platform: the Linux default ("fork") can
+# deadlock when forking from a FastAPI worker thread after NumPy/PyTorch/
+# librosa have already spun up internal (BLAS/OpenMP) thread pools, since a
+# lock held by another thread at fork time is copied into the child in a
+# permanently-locked state.
+_MP_CONTEXT = multiprocessing.get_context("spawn")
+
+
+def _pitch_shift_worker(audio_np, sample_rate, n_steps, output_path, error_path) -> None:
+    """
+    Runs in a child process (module-level so it's picklable under 'spawn').
+    Writes the result to output_path on success, or the error message to
+    error_path on failure. Never communicates back via a Queue: joining a
+    process after it has put a large object on a Queue can deadlock, since
+    the child's feeder thread blocks writing to the pipe until the parent
+    drains it while the parent is blocked in join() waiting for the child
+    to exit.
+    """
+    import librosa  # keep torch out of the child; only librosa/numpy needed
+    try:
+        shifted = librosa.effects.pitch_shift(y=audio_np, sr=sample_rate, n_steps=n_steps)
+        np.save(output_path, shifted, allow_pickle=False)
+    except Exception as e:
+        with open(error_path, "w") as f:
+            f.write(str(e))
+
+
+def _run_pitch_shift_subprocess(audio_np, sample_rate, n_steps, timeout_seconds: float) -> Optional[np.ndarray]:
+    """
+    Runs librosa's pitch shift in a spawned subprocess with a genuine,
+    enforceable timeout. Returns the shifted array on success, or None on
+    timeout, child failure, or missing output. Never returns while the
+    child could still be running.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = os.path.join(tmp_dir, "shifted.npy")
+        error_path = os.path.join(tmp_dir, "error.txt")
+
+        proc = _MP_CONTEXT.Process(
+            target=_pitch_shift_worker,
+            args=(audio_np, sample_rate, n_steps, output_path, error_path),
+            daemon=True,
+        )
+        proc.start()
+        proc.join(timeout=timeout_seconds)
+
+        timed_out = proc.is_alive()
+        if timed_out:
+            proc.terminate()
+            proc.join(timeout=2)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+
+        try:
+            proc.close()
+        except ValueError:
+            pass  # refused to close (still alive) - leave it to GC
+
+        if timed_out or os.path.exists(error_path) or not os.path.exists(output_path):
+            return None
+
+        return np.load(output_path, allow_pickle=False)
 
 def add_gaussian_noise(waveform, noise_level=0.005):
     """
@@ -54,7 +120,7 @@ def apply_frequency_masking(waveform, sample_rate, mask_freq_start, mask_freq_en
     
     return masked_waveform
 
-def apply_pitch_shift(waveform, sample_rate, pitch_shift_semitones):
+def apply_pitch_shift(waveform, sample_rate, pitch_shift_semitones, timeout_seconds: float = 30.0):
     """
     Apply pitch shifting to the waveform
     waveform: Tensor [channels, time]
@@ -89,36 +155,24 @@ def apply_pitch_shift(waveform, sample_rate, pitch_shift_semitones):
         
         print(f"DEBUG: Using librosa.effects.pitch_shift with n_steps={pitch_shift_semitones}")
         print(f"DEBUG: Audio length: {len(audio_np)} samples")
-        
-        # Apply pitch shift using librosa with timeout protection
-        import signal
-        import time
-        
-        def timeout_handler(signum, frame):
-            raise TimeoutError("Pitch shift operation timed out")
-        
-        # Set a timeout of 30 seconds
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(30)
-        
-        try:
-            shifted_audio = librosa.effects.pitch_shift(
-                y=audio_np, 
-                sr=sample_rate, 
-                n_steps=pitch_shift_semitones
-            )
-            signal.alarm(0)  # Cancel the alarm
-            
-            # Convert back to torch tensor
-            result = torch.from_numpy(shifted_audio).unsqueeze(0)  # Add channel dimension
-            print(f"DEBUG: Librosa pitch shift completed successfully, output shape: {result.shape}")
-            return result
-            
-        except TimeoutError:
-            signal.alarm(0)  # Cancel the alarm
-            print("DEBUG: Pitch shift timed out, returning original waveform")
+
+        # Apply pitch shift in a spawned subprocess with a genuine, killable
+        # timeout (cross-platform; signal.SIGALRM does not exist on Windows
+        # and signal.signal() is unsafe outside the main thread of the main
+        # interpreter, which FastAPI threadpool workers are not).
+        shifted_audio = _run_pitch_shift_subprocess(
+            audio_np, sample_rate, pitch_shift_semitones, timeout_seconds
+        )
+
+        if shifted_audio is None:
+            print("DEBUG: Pitch shift timed out or failed, returning original waveform")
             return waveform
-            
+
+        # Convert back to torch tensor
+        result = torch.from_numpy(shifted_audio).unsqueeze(0)  # Add channel dimension
+        print(f"DEBUG: Librosa pitch shift completed successfully, output shape: {result.shape}")
+        return result
+
     except Exception as e:
         print(f"DEBUG: Pitch shift failed with error: {e}")
         print("DEBUG: Returning original waveform")
