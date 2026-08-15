@@ -6,11 +6,12 @@ import asyncio
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import torch
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from dataclasses import asdict
@@ -26,6 +27,7 @@ from .dataset import (
     list_recordings,
     resolve_recording_path,
 )
+from .robustness import robustness_analysis
 from .service import (
     PAIR_THRESHOLD_VERSION,
     PREPROCESSING_VERSION,
@@ -500,3 +502,152 @@ async def run_temporal_occlusion(
     finally:
         for upload in [*enrollment_files, probe_file]:
             await upload.close()
+
+
+class PerturbationSpec(BaseModel):
+    type: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class RobustnessDatasetRequest(BaseModel):
+    model: str
+    enrollment_recording_ids: list[str]
+    probe_recording_id: str
+    perturbation: PerturbationSpec
+
+
+@router.post("/robustness/upload")
+async def run_robustness_upload(
+    model: str = Form(...),
+    enrollment_files: list[UploadFile] = File(...),
+    probe_file: UploadFile = File(...),
+    perturbation_type: str = Form(...),
+    noise_level: float | None = Form(None),
+    seed: int | None = Form(None),
+    mask_start_percent: float | None = Form(None),
+    mask_end_percent: float | None = Form(None),
+    mask_freq_start: float | None = Form(None),
+    mask_freq_end: float | None = Form(None),
+    pitch_shift_semitones: float | None = Form(None),
+    stretch_factor: float | None = Form(None),
+):
+    """Perturbation-robustness analysis for one uploaded probe against a
+    temporary profile built from 3-5 uploaded enrolment clips."""
+
+    if not 3 <= len(enrollment_files) <= 5:
+        raise HTTPException(status_code=422, detail="Upload between 3 and 5 enrolment recordings.")
+
+    try:
+        get_model_spec(model)
+    except UnsupportedSpeakerModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    raw_params = {
+        key: value
+        for key, value in {
+            "noise_level": noise_level,
+            "seed": seed,
+            "mask_start_percent": mask_start_percent,
+            "mask_end_percent": mask_end_percent,
+            "mask_freq_start": mask_freq_start,
+            "mask_freq_end": mask_freq_end,
+            "pitch_shift_semitones": pitch_shift_semitones,
+            "stretch_factor": stretch_factor,
+        }.items()
+        if value is not None
+    }
+
+    try:
+        with TemporaryDirectory(prefix="voxlit-sv-") as temp_dir:
+            temp_path = Path(temp_dir)
+            enrollment_paths: list[Path] = []
+            for index, upload in enumerate(enrollment_files):
+                suffix = _validate_upload(upload)
+                path = temp_path / f"enrollment-{index}{suffix}"
+                _save_upload(upload, path)
+                enrollment_paths.append(path)
+
+            probe_suffix = _validate_upload(probe_file)
+            probe_path = temp_path / f"probe{probe_suffix}"
+            _save_upload(probe_file, probe_path)
+
+            # Duplicate-input rejection by audio content, not filename, so
+            # differently-named copies of the same recording can't bias the
+            # centroid or serve as both enrollment and probe.
+            all_hashes = await run_in_threadpool(cache.hash_audio_files, [*enrollment_paths, probe_path])
+            enrollment_hashes, probe_hash = all_hashes[:-1], all_hashes[-1]
+            if len(enrollment_hashes) != len(set(enrollment_hashes)):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Two or more enrollment recordings have identical audio content.",
+                )
+            if probe_hash in enrollment_hashes:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Probe recording has the same audio content as an enrollment recording.",
+                )
+
+            result = await run_in_threadpool(
+                robustness_analysis,
+                model,
+                enrollment_paths,
+                probe_path,
+                perturbation_type,
+                raw_params,
+            )
+            return {**result, "probe_label": "probe"}
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError) as error:
+        status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
+        raise HTTPException(status_code=status, detail=str(error)) from error
+    finally:
+        for upload in [*enrollment_files, probe_file]:
+            await upload.close()
+
+
+@router.post("/robustness/dataset")
+async def run_robustness_dataset(payload: RobustnessDatasetRequest):
+    """Perturbation-robustness analysis for one demo-dataset probe against a
+    temporary profile built from 3-5 demo-dataset enrolment recordings."""
+
+    if not 3 <= len(payload.enrollment_recording_ids) <= 5:
+        raise HTTPException(status_code=422, detail="Provide between 3 and 5 enrolment recording ids.")
+    if len(payload.enrollment_recording_ids) != len(set(payload.enrollment_recording_ids)):
+        raise HTTPException(status_code=422, detail="Duplicate enrollment recording ids are not allowed.")
+    if payload.probe_recording_id in payload.enrollment_recording_ids:
+        raise HTTPException(
+            status_code=422,
+            detail="Probe recording id must not also be an enrollment recording id.",
+        )
+
+    try:
+        get_model_spec(payload.model)
+    except UnsupportedSpeakerModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        enrollment_paths = [resolve_recording_path(rid) for rid in payload.enrollment_recording_ids]
+        probe_path = resolve_recording_path(payload.probe_recording_id)
+    except DatasetUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RecordingNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    try:
+        result = await run_in_threadpool(
+            robustness_analysis,
+            payload.model,
+            enrollment_paths,
+            probe_path,
+            payload.perturbation.type,
+            payload.perturbation.params,
+        )
+        return {
+            **result,
+            "enrollment_recording_ids": payload.enrollment_recording_ids,
+            "probe_recording_id": payload.probe_recording_id,
+        }
+    except (ValueError, RuntimeError) as error:
+        status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
+        raise HTTPException(status_code=status, detail=str(error)) from error

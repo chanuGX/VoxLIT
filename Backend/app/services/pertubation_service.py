@@ -74,12 +74,23 @@ def _run_pitch_shift_subprocess(audio_np, sample_rate, n_steps, timeout_seconds:
 
         return np.load(output_path, allow_pickle=False)
 
-def add_gaussian_noise(waveform, noise_level=0.005):
+def add_gaussian_noise(waveform, noise_level=0.005, seed: int | None = None):
     """
     waveform: Tensor [channels, time]
     noise_level: Standard deviation of noise
+    seed: optional int for a local, request-scoped torch.Generator. Never
+    touches global RNG state, so concurrent requests can't interfere with
+    each other's noise draws. Omitting it preserves the original,
+    unseeded behaviour exactly.
     """
-    noise = torch.randn_like(waveform) * noise_level
+    if seed is not None:
+        generator = torch.Generator(device=waveform.device)
+        generator.manual_seed(seed)
+        noise = torch.randn(
+            waveform.shape, generator=generator, dtype=waveform.dtype, device=waveform.device
+        ) * noise_level
+    else:
+        noise = torch.randn_like(waveform) * noise_level
     return waveform + noise
 
 def apply_time_masking(waveform, mask_start_percent, mask_end_percent):
