@@ -32,6 +32,7 @@ from .service import (
     extract_batch_embeddings,
     get_model_spec,
     list_models,
+    project_batch_embeddings,
     rehydrate_cached_embedding,
     temporal_occlusion_saliency,
     verify_speaker,
@@ -83,6 +84,18 @@ MAX_BATCH_SIZE = 100
 class BatchDatasetRequest(BaseModel):
     model: str
     recording_ids: list[str]
+
+
+SUPPORTED_REDUCTION_METHODS = {"pca", "tsne", "umap"}
+SUPPORTED_PROJECTION_COMPONENTS = {2, 3}
+
+
+class BatchProjectionRequest(BaseModel):
+    model: str
+    embeddings: list[list[float]]
+    labels: list[str]
+    reduction_method: str = "pca"
+    n_components: int = 2
 
 
 def _validate_upload(file: UploadFile) -> str:
@@ -307,6 +320,57 @@ async def run_batch_dataset(payload: BatchDatasetRequest):
     except (ValueError, RuntimeError) as error:
         status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
         raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+@router.post("/batch/project")
+async def run_batch_projection(payload: BatchProjectionRequest):
+    """Visualization-only PCA/t-SNE/UMAP projection of precomputed batch embeddings.
+
+    Never used for clustering — clustering runs on the original embeddings
+    in /batch/upload and /batch/dataset. This endpoint exists because the
+    legacy /inferences/embeddings route re-runs Whisper/Wav2Vec2 inference
+    internally and cannot accept precomputed vectors or ecapa-tdnn/resnet34-lm
+    model keys.
+    """
+
+    if not MIN_BATCH_SIZE <= len(payload.embeddings) <= MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Provide between {MIN_BATCH_SIZE} and {MAX_BATCH_SIZE} embeddings.",
+        )
+    if len(payload.embeddings) != len(payload.labels):
+        raise HTTPException(status_code=422, detail="Embeddings and labels must have the same length.")
+    if payload.reduction_method not in SUPPORTED_REDUCTION_METHODS:
+        allowed = ", ".join(sorted(SUPPORTED_REDUCTION_METHODS))
+        raise HTTPException(status_code=400, detail=f"reduction_method must be one of: {allowed}.")
+    if payload.n_components not in SUPPORTED_PROJECTION_COMPONENTS:
+        raise HTTPException(status_code=422, detail="n_components must be 2 or 3.")
+
+    try:
+        get_model_spec(payload.model)
+    except UnsupportedSpeakerModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        coordinates, effective_components, method_used = await run_in_threadpool(
+            project_batch_embeddings,
+            payload.embeddings,
+            payload.model,
+            payload.reduction_method,
+            payload.n_components,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return {
+        "labels": payload.labels,
+        "model": payload.model,
+        "reduction_method": payload.reduction_method,
+        "reduction_method_used": method_used,
+        "n_components": payload.n_components,
+        "effective_components": effective_components,
+        "coordinates": coordinates.tolist(),
+    }
 
 
 @router.post("/explain/temporal-occlusion")

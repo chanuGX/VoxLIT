@@ -379,6 +379,107 @@ def batch_verification_analysis(
     return assemble_batch_analysis(model_key, embeddings, labels)
 
 
+def _validate_embedding_matrix(
+    embeddings: Sequence[Sequence[float]], expected_dimension: int
+) -> np.ndarray:
+    """Build a float64 matrix, rejecting shapes/values a projection can't use.
+
+    A single dimension check covers empty rows, ragged rows, and oversized
+    rows: every row must match the model's exact production embedding
+    dimension, nothing else is a valid speaker-verification embedding.
+    """
+
+    row_lengths = {len(row) for row in embeddings}
+    if row_lengths != {expected_dimension}:
+        raise ValueError(
+            f"Each embedding must have exactly {expected_dimension} dimensions "
+            f"(found length(s): {sorted(row_lengths)})."
+        )
+
+    matrix = np.asarray(embeddings, dtype=np.float64)
+    if not np.isfinite(matrix).all():
+        raise ValueError("Embeddings must not contain NaN or infinite values.")
+    return matrix
+
+
+def project_batch_embeddings(
+    embeddings: Sequence[Sequence[float]],
+    model_key: str,
+    reduction_method: str,
+    n_components: int,
+) -> tuple[np.ndarray, int, str]:
+    """Visualization-only PCA/t-SNE/UMAP projection of precomputed embeddings.
+
+    Never used for clustering — clustering already runs on raw embeddings in
+    `assemble_batch_analysis`/`clustering.cluster_batch`. Always returns
+    exactly `n_components` columns: PCA (and PCA-as-UMAP-fallback) cannot
+    manufacture more components than a very small batch allows (e.g. 2
+    recordings requesting 3D), so the shortfall is deterministically
+    zero-padded and the achievable count is reported separately. t-SNE and
+    UMAP never need padding here — for tiny batches they run with
+    `init="random"` instead of their density/spectral-based default init,
+    which removes their sample-count ceiling entirely (verified empirically
+    against sklearn 1.9 / umap-learn 0.5.12: the default `init="pca"` for
+    t-SNE and `init="spectral"` for UMAP both fail below a measured sample
+    threshold, independent of any `perplexity`/`n_neighbors` clamping).
+
+    Returns (coordinates, effective_components, reduction_method_used).
+    """
+
+    spec = get_model_spec(model_key)
+    matrix = _validate_embedding_matrix(embeddings, spec.embedding_dimension)
+    n_samples, n_features = matrix.shape
+
+    method_used = reduction_method
+    if reduction_method == "umap" and n_samples < 3:
+        # UMAP requires n_neighbors >= 2, which requires >= 3 samples under
+        # any initialization strategy — deterministic, documented fallback.
+        method_used = "pca"
+
+    try:
+        if method_used == "pca":
+            from sklearn.decomposition import PCA
+
+            achievable = min(n_samples, n_features, n_components)
+            coords = PCA(n_components=achievable, random_state=42).fit_transform(matrix)
+        elif method_used == "tsne":
+            from sklearn.manifold import TSNE
+
+            perplexity = min(30, n_samples - 1)
+            init = "random" if n_samples < n_components else "pca"
+            coords = TSNE(
+                n_components=n_components,
+                random_state=42,
+                perplexity=perplexity,
+                init=init,
+            ).fit_transform(matrix)
+            achievable = n_components
+        else:  # umap, n_samples >= 3
+            import umap
+
+            n_neighbors = max(2, min(15, n_samples - 1))
+            init = "random" if n_samples < n_components + 2 else "spectral"
+            coords = umap.UMAP(
+                n_components=n_components,
+                random_state=42,
+                n_neighbors=n_neighbors,
+                init=init,
+            ).fit_transform(matrix)
+            achievable = n_components
+    except Exception as error:
+        # Normalize any library-internal exception (e.g. UMAP's TypeError on
+        # spectral init for small batches) into a ValueError, so callers get
+        # one consistent failure type regardless of which reducer ran.
+        raise ValueError(f"Projection failed: {error}") from error
+
+    coords = np.asarray(coords, dtype=np.float64)
+    if coords.shape[1] < n_components:
+        pad = np.zeros((coords.shape[0], n_components - coords.shape[1]))
+        coords = np.hstack([coords, pad])
+
+    return coords, min(achievable, n_components), method_used
+
+
 def rehydrate_cached_embedding(
     model_key: str, values: Sequence[float]
 ) -> torch.Tensor | None:

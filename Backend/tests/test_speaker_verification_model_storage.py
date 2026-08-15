@@ -152,7 +152,16 @@ def test_reloading_service_never_calls_real_model_loaders(monkeypatch):
     monkeypatch.setattr(sb_classifiers.EncoderClassifier, "from_hparams", ecapa_loader)
     monkeypatch.setattr(pyannote_audio.Model, "from_pretrained", resnet_loader)
 
-    importlib.reload(service)
-
-    ecapa_loader.assert_not_called()
-    resnet_loader.assert_not_called()
+    # Reload replaces every module-level class/function (e.g.
+    # UnsupportedSpeakerModel, get_model_spec) with new objects, which would
+    # desync other modules that already imported names from `service` (e.g.
+    # router.py's `except UnsupportedSpeakerModel` clause) for the rest of
+    # the test session. Snapshot and restore so this test stays isolated.
+    original_state = dict(vars(service))
+    try:
+        importlib.reload(service)
+        ecapa_loader.assert_not_called()
+        resnet_loader.assert_not_called()
+    finally:
+        vars(service).clear()
+        vars(service).update(original_state)
