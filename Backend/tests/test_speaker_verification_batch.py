@@ -57,6 +57,7 @@ _FAKE_SPEC = service.SpeakerModelSpec(
     key="test-model",
     label="Test model",
     model_id="test/model",
+    revision="test-revision",
     architecture="test",
     embedding_dimension=2,
     threshold=0.5,
@@ -219,7 +220,7 @@ async def test_batch_upload_endpoint_uses_server_generated_labels(client):
         ("files", _audio_upload("secret_name_bob.wav")),
     ]
     with patch(
-        "app.tasks.verification.router.batch_verification_analysis",
+        "app.tasks.verification.router._cached_batch_analysis",
         return_value=expected,
     ) as mock_analysis:
         response = await client.post(
@@ -286,7 +287,7 @@ async def test_batch_dataset_endpoint_returns_service_result_without_leaks(clien
         "recording_count": len(ids),
     }
     with patch(
-        "app.tasks.verification.router.batch_verification_analysis",
+        "app.tasks.verification.router._cached_batch_analysis",
         return_value=expected,
     ) as mock_analysis:
         response = await client.post(

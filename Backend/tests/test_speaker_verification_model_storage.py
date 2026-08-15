@@ -6,6 +6,7 @@ Inference are monkeypatched at their real, lazily-imported module locations
 so we can assert on the exact arguments the adapters pass to them.
 """
 
+import dataclasses
 import importlib
 from unittest.mock import MagicMock
 
@@ -43,9 +44,10 @@ def test_ecapa_adapter_uses_controlled_savedir_and_hf_cache_dir(monkeypatch, tmp
 
     monkeypatch.setattr(sb_classifiers, "EncoderClassifier", _FakeEncoderClassifier)
 
-    service._ECAPAAdapter(service.MODEL_SPECS["ecapa-tdnn"])
+    spec = service.MODEL_SPECS["ecapa-tdnn"]
+    service._ECAPAAdapter(spec)
 
-    expected_savedir = tmp_path / "ecapa-tdnn"
+    expected_savedir = tmp_path / "ecapa-tdnn" / spec.revision
     expected_hf_cache_dir = tmp_path / "huggingface"
 
     assert captured["savedir"] == str(expected_savedir)
@@ -55,6 +57,47 @@ def test_ecapa_adapter_uses_controlled_savedir_and_hf_cache_dir(monkeypatch, tmp
     # fetch_config override must be present and point at the controlled dir.
     assert captured["fetch_config"].huggingface_cache_dir == str(expected_hf_cache_dir)
     assert expected_hf_cache_dir.is_dir()
+
+    # The pinned revision must reach the fetch config, not just the savedir.
+    assert captured["fetch_config"].revision == spec.revision
+
+
+def test_ecapa_adapter_savedir_is_namespaced_by_revision(monkeypatch, tmp_path):
+    """A different pinned revision must resolve to a different savedir.
+
+    SpeechBrain's fetch() reuses whatever file already exists at a fixed
+    savedir path regardless of the requested revision, so revision-namespacing
+    the savedir is what actually guarantees the pinned SHA is what gets
+    loaded, rather than a stale copy from an older revision.
+    """
+
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_MODEL_ROOT", tmp_path)
+
+    captured: list[dict] = []
+
+    class _FakeEncoderClassifier:
+        @classmethod
+        def from_hparams(cls, **kwargs):
+            captured.append(kwargs)
+            return object()
+
+    import speechbrain.inference.classifiers as sb_classifiers
+
+    monkeypatch.setattr(sb_classifiers, "EncoderClassifier", _FakeEncoderClassifier)
+
+    base_spec = service.MODEL_SPECS["ecapa-tdnn"]
+    spec_a = dataclasses.replace(base_spec, revision="revision-a")
+    spec_b = dataclasses.replace(base_spec, revision="revision-b")
+
+    service._ECAPAAdapter(spec_a)
+    service._ECAPAAdapter(spec_b)
+
+    savedir_a, savedir_b = captured[0]["savedir"], captured[1]["savedir"]
+    assert savedir_a != savedir_b
+    assert savedir_a == str(settings.speaker_verification_ecapa_dir_for_revision("revision-a"))
+    assert savedir_b == str(settings.speaker_verification_ecapa_dir_for_revision("revision-b"))
+    assert captured[0]["fetch_config"].revision == "revision-a"
+    assert captured[1]["fetch_config"].revision == "revision-b"
 
 
 def test_resnet_adapter_uses_controlled_hf_cache_dir(monkeypatch, tmp_path):
@@ -81,7 +124,8 @@ def test_resnet_adapter_uses_controlled_hf_cache_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(pyannote_audio, "Model", _FakeModel)
     monkeypatch.setattr(pyannote_audio, "Inference", _FakeInference)
 
-    service._WeSpeakerAdapter(service.MODEL_SPECS["resnet34-lm"])
+    spec = service.MODEL_SPECS["resnet34-lm"]
+    service._WeSpeakerAdapter(spec)
 
     expected_hf_cache_dir = tmp_path / "huggingface"
 
@@ -89,6 +133,10 @@ def test_resnet_adapter_uses_controlled_hf_cache_dir(monkeypatch, tmp_path):
     # the controlled directory, never None/default.
     assert captured["cache_dir"] == str(expected_hf_cache_dir)
     assert expected_hf_cache_dir.is_dir()
+
+    # The pinned revision must reach the loader via pyannote's "id@revision"
+    # checkpoint syntax, not just the bare repo id.
+    assert captured["model_id"] == f"{spec.model_id}@{spec.revision}"
 
 
 def test_reloading_service_never_calls_real_model_loaders(monkeypatch):

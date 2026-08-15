@@ -198,6 +198,7 @@ _CLUSTERING_FAKE_SPEC = service.SpeakerModelSpec(
     key="ecapa-tdnn",
     label="Test model",
     model_id="test/model",
+    revision="test-revision",
     architecture="test",
     embedding_dimension=2,
     threshold=0.5,
@@ -280,7 +281,7 @@ async def test_batch_upload_endpoint_response_includes_clustering_fields(client)
         ("files", ("two.wav", b"RIFF-fake-audio", "audio/wav")),
     ]
     with patch(
-        "app.tasks.verification.router.batch_verification_analysis",
+        "app.tasks.verification.router._cached_batch_analysis",
         return_value=expected,
     ):
         response = await client.post(
@@ -343,7 +344,7 @@ async def test_batch_dataset_endpoint_response_includes_clustering_fields_withou
         ],
     }
     with patch(
-        "app.tasks.verification.router.batch_verification_analysis",
+        "app.tasks.verification.router._cached_batch_analysis",
         return_value=expected,
     ):
         response = await client.post(

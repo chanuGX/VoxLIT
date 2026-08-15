@@ -28,6 +28,7 @@ def test_verify_speaker_uses_normalised_enrollment_centroid(monkeypatch):
         key="test-model",
         label="Test model",
         model_id="test/model",
+        revision="test-revision",
         architecture="test",
         embedding_dimension=2,
         threshold=0.5,

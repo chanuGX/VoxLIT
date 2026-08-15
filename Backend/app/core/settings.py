@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     def speaker_verification_ecapa_dir(self) -> Path:
         return self.SPEAKER_VERIFICATION_MODEL_ROOT / "ecapa-tdnn"
 
+    def speaker_verification_ecapa_dir_for_revision(self, revision: str) -> Path:
+        """Revision-namespaced ECAPA savedir.
+
+        SpeechBrain's fetch() reuses whatever already exists at a fixed
+        savedir path regardless of the pinned revision, so a different
+        revision must resolve to a different directory to guarantee the
+        files loaded match the pinned commit.
+        """
+        return self.speaker_verification_ecapa_dir / revision
+
     @property
     def speaker_verification_hf_cache_dir(self) -> Path:
         return self.SPEAKER_VERIFICATION_MODEL_ROOT / "huggingface"

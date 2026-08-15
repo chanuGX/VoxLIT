@@ -30,17 +30,28 @@ class SpeakerModelSpec:
     key: str
     label: str
     model_id: str
+    revision: str
     architecture: str
     embedding_dimension: int
     threshold: float
     recommended: bool
 
 
+# Pair-verification thresholds are EER-calibrated and locked before test
+# evaluation (see the `calibration` block returned by `verify_speaker`).
+# This version identifies that calibration methodology for cache keys.
+PAIR_THRESHOLD_VERSION = "pair-threshold-v1-eer"
+
+# Identifies the fixed preprocessing pipeline in `_BaseAdapter`: 16kHz
+# resample, mono downmix, L2-normalized output embedding.
+PREPROCESSING_VERSION = "verification-preprocess-v1"
+
 MODEL_SPECS: dict[str, SpeakerModelSpec] = {
     "ecapa-tdnn": SpeakerModelSpec(
         key="ecapa-tdnn",
         label="ECAPA-TDNN",
         model_id="speechbrain/spkrec-ecapa-voxceleb",
+        revision="0f99f2d0ebe89ac095bcc5903c4dd8f72b367286",
         architecture="ECAPA-TDNN",
         embedding_dimension=192,
         threshold=0.3578562438488006,
@@ -50,6 +61,7 @@ MODEL_SPECS: dict[str, SpeakerModelSpec] = {
         key="resnet34-lm",
         label="WeSpeaker ResNet34-LM",
         model_id="pyannote/wespeaker-voxceleb-resnet34-LM",
+        revision="837717ddb9ff5507820346191109dc79c958d614",
         architecture="ResNet34-LM",
         embedding_dimension=256,
         threshold=0.3843278586864471,
@@ -120,7 +132,7 @@ class _ECAPAAdapter(_BaseAdapter):
                 "Install the backend requirements and restart the API."
             ) from error
 
-        savedir = settings.speaker_verification_ecapa_dir
+        savedir = settings.speaker_verification_ecapa_dir_for_revision(spec.revision)
         hf_cache_dir = settings.speaker_verification_hf_cache_dir
         savedir.mkdir(parents=True, exist_ok=True)
         hf_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -131,7 +143,10 @@ class _ECAPAAdapter(_BaseAdapter):
                 savedir=str(savedir),
                 run_opts={"device": str(self.device)},
                 local_strategy=LocalStrategy.COPY,
-                fetch_config=FetchConfig(huggingface_cache_dir=str(hf_cache_dir)),
+                fetch_config=FetchConfig(
+                    revision=spec.revision,
+                    huggingface_cache_dir=str(hf_cache_dir),
+                ),
             )
             if hasattr(self.model, "to"):
                 self.model.to(self.device)
@@ -169,7 +184,8 @@ class _WeSpeakerAdapter(_BaseAdapter):
         previous_setting = os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD")
         os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
         try:
-            model = Model.from_pretrained(spec.model_id, cache_dir=str(hf_cache_dir))
+            checkpoint = f"{spec.model_id}@{spec.revision}"
+            model = Model.from_pretrained(checkpoint, cache_dir=str(hf_cache_dir))
         except Exception as error:
             raise SpeakerModelUnavailable(f"Could not load ResNet34-LM: {error}") from error
         finally:
@@ -313,6 +329,40 @@ def pairwise_decision_matrix(similarity: np.ndarray, threshold: float) -> np.nda
     return decisions
 
 
+def assemble_batch_analysis(
+    model_key: str,
+    embeddings: torch.Tensor,
+    labels: Sequence[str],
+) -> dict[str, object]:
+    """Pairwise similarity/decision/clustering analysis from precomputed embeddings.
+
+    Split out of `batch_verification_analysis` so a caller can supply a
+    tensor merged from cached and freshly extracted embeddings without
+    re-running extraction.
+    """
+
+    if embeddings.shape[0] != len(labels):
+        raise ValueError("Embeddings and labels must have the same length.")
+
+    spec = get_model_spec(model_key)
+    similarity = pairwise_similarity_matrix(embeddings)
+    decisions = pairwise_decision_matrix(similarity, spec.threshold)
+    cluster_result = clustering.cluster_batch(model_key, similarity, labels)
+
+    return {
+        "model": spec.key,
+        "model_label": spec.label,
+        "threshold": spec.threshold,
+        "recording_count": len(labels),
+        "embedding_dimension": spec.embedding_dimension,
+        "labels": list(labels),
+        "embeddings": embeddings.tolist(),
+        "similarity_matrix": similarity.tolist(),
+        "decision_matrix": decisions.tolist(),
+        **cluster_result,
+    }
+
+
 def batch_verification_analysis(
     model_key: str,
     audio_paths: Sequence[str | Path],
@@ -325,24 +375,32 @@ def batch_verification_analysis(
     if len(audio_paths) != len(labels):
         raise ValueError("Recording paths and labels must have the same length.")
 
-    spec = get_model_spec(model_key)
     embeddings = extract_batch_embeddings(model_key, audio_paths)
-    similarity = pairwise_similarity_matrix(embeddings)
-    decisions = pairwise_decision_matrix(similarity, spec.threshold)
-    cluster_result = clustering.cluster_batch(model_key, similarity, labels)
+    return assemble_batch_analysis(model_key, embeddings, labels)
 
-    return {
-        "model": spec.key,
-        "model_label": spec.label,
-        "threshold": spec.threshold,
-        "recording_count": len(audio_paths),
-        "embedding_dimension": spec.embedding_dimension,
-        "labels": list(labels),
-        "embeddings": embeddings.tolist(),
-        "similarity_matrix": similarity.tolist(),
-        "decision_matrix": decisions.tolist(),
-        **cluster_result,
-    }
+
+def rehydrate_cached_embedding(
+    model_key: str, values: Sequence[float]
+) -> torch.Tensor | None:
+    """Validate and L2-renormalize a cache-hit embedding, or None if invalid.
+
+    Mirrors `_BaseAdapter.validate_embedding`'s checks (dimension, finite,
+    non-zero magnitude) but returns None instead of raising, so an invalid
+    cached entry is treated as a cache miss rather than an error.
+    """
+
+    spec = get_model_spec(model_key)
+    try:
+        tensor = torch.tensor(values, dtype=torch.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if tensor.numel() != spec.embedding_dimension:
+        return None
+    if not torch.isfinite(tensor).all():
+        return None
+    if float(torch.linalg.vector_norm(tensor)) == 0.0:
+        return None
+    return F.normalize(tensor, p=2, dim=0)
 
 
 def temporal_occlusion_saliency(

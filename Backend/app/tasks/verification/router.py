@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import torch
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from dataclasses import asdict
 
+from . import cache, clustering
 from .dataset import (
     DatasetUnavailable,
     RecordingNotFound,
@@ -21,11 +24,15 @@ from .dataset import (
     resolve_recording_path,
 )
 from .service import (
+    PAIR_THRESHOLD_VERSION,
+    PREPROCESSING_VERSION,
     SpeakerModelUnavailable,
     UnsupportedSpeakerModel,
-    batch_verification_analysis,
+    assemble_batch_analysis,
+    extract_batch_embeddings,
     get_model_spec,
     list_models,
+    rehydrate_cached_embedding,
     temporal_occlusion_saliency,
     verify_speaker,
 )
@@ -145,6 +152,89 @@ async def run_verification(
             await upload.close()
 
 
+async def _cached_batch_analysis(
+    model_key: str,
+    audio_paths: list[Path],
+    labels: list[str],
+) -> dict[str, object]:
+    """Batch analysis with a task-local Redis cache in front of it.
+
+    Checks a complete cached result first; on a miss, reuses cached
+    per-recording embeddings and computes only the missing ones. Any Redis
+    failure is already absorbed inside `cache.py`, so this always falls
+    through to a normal (uncached) analysis.
+    """
+
+    spec = get_model_spec(model_key)
+    clustering_spec = clustering.CLUSTERING_SPECS[model_key]
+
+    audio_hashes = await run_in_threadpool(cache.hash_audio_files, audio_paths)
+    recordings = list(zip(audio_hashes, labels))
+
+    result_key = cache.batch_result_cache_key(
+        model_key=model_key,
+        model_id=spec.model_id,
+        revision=spec.revision,
+        preprocessing_version=PREPROCESSING_VERSION,
+        pair_threshold_version=PAIR_THRESHOLD_VERSION,
+        pair_threshold_value=spec.threshold,
+        clustering_threshold_version=clustering.CLUSTERING_THRESHOLD_VERSION,
+        clustering_distance_threshold=clustering_spec.distance_threshold,
+        recordings=recordings,
+    )
+
+    cached_result = await cache.get_batch_result(
+        result_key,
+        model_key=model_key,
+        expected_labels=labels,
+        pair_threshold_value=spec.threshold,
+        clustering_threshold_version=clustering.CLUSTERING_THRESHOLD_VERSION,
+        clustering_distance_threshold=clustering_spec.distance_threshold,
+    )
+    if cached_result is not None:
+        return cached_result
+
+    embedding_keys = [
+        cache.embedding_cache_key(
+            model_key=model_key,
+            model_id=spec.model_id,
+            revision=spec.revision,
+            preprocessing_version=PREPROCESSING_VERSION,
+            audio_sha256=audio_hash,
+        )
+        for audio_hash in audio_hashes
+    ]
+    cached_raw = await asyncio.gather(
+        *(cache.get_embedding(key, spec.embedding_dimension) for key in embedding_keys)
+    )
+
+    embeddings: list[torch.Tensor | None] = [None] * len(audio_paths)
+    missing_indices: list[int] = []
+    for index, raw_values in enumerate(cached_raw):
+        tensor = rehydrate_cached_embedding(model_key, raw_values) if raw_values is not None else None
+        embeddings[index] = tensor
+        if tensor is None:
+            missing_indices.append(index)
+
+    if missing_indices:
+        missing_paths = [audio_paths[index] for index in missing_indices]
+        computed = await run_in_threadpool(extract_batch_embeddings, model_key, missing_paths)
+        for position, index in enumerate(missing_indices):
+            embeddings[index] = computed[position]
+
+    merged_embeddings = torch.stack(embeddings)  # type: ignore[arg-type]
+
+    result = await run_in_threadpool(
+        assemble_batch_analysis, model_key, merged_embeddings, labels
+    )
+
+    await cache.set_batch_result(result_key, result)
+    for index in missing_indices:
+        await cache.set_embedding(embedding_keys[index], model_key, result["embeddings"][index])
+
+    return result
+
+
 @router.post("/batch/upload")
 async def run_batch_upload(
     model: str = Form(...),
@@ -176,12 +266,7 @@ async def run_batch_upload(
                 audio_paths.append(path)
                 labels.append(label)
 
-            return await run_in_threadpool(
-                batch_verification_analysis,
-                model,
-                audio_paths,
-                labels,
-            )
+            return await _cached_batch_analysis(model, audio_paths, labels)
     except HTTPException:
         raise
     except (ValueError, RuntimeError) as error:
@@ -218,12 +303,7 @@ async def run_batch_dataset(payload: BatchDatasetRequest):
         raise HTTPException(status_code=404, detail=str(error)) from error
 
     try:
-        return await run_in_threadpool(
-            batch_verification_analysis,
-            payload.model,
-            audio_paths,
-            recording_ids,
-        )
+        return await _cached_batch_analysis(payload.model, audio_paths, recording_ids)
     except (ValueError, RuntimeError) as error:
         status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
         raise HTTPException(status_code=status, detail=str(error)) from error
