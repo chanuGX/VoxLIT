@@ -9,4 +9,4 @@
  * Then register them in src/tasks/registry.tsx (TASK_SLOTS + capabilities)
  * and flip the task's status to "active".
  */
-export {};
+export { DiarizationWorkbench } from "./DiarizationWorkbench";
