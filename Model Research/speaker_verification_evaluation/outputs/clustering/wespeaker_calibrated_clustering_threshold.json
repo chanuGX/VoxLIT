@@ -1,0 +1,36 @@
+{
+  "model_key": "wespeaker",
+  "model_id": "pyannote/wespeaker-voxceleb-resnet34-LM",
+  "embedding_dimension": 256,
+  "embeddings_source_dir": "outputs\\embeddings\\wespeaker",
+  "linkage": "average",
+  "distance_metric": "cosine_precomputed",
+  "split_strategy": "Existing speaker-disjoint calibration/test split from utterances.csv. Threshold selected on 'calibration' only; evaluated once on 'test' as holdout.",
+  "calibration_speaker_count": 9,
+  "calibration_recording_count": 1779,
+  "holdout_speaker_count": 15,
+  "holdout_recording_count": 3078,
+  "search_method": "Merge-distance derived candidates: one per midpoint between consecutive unique average-linkage merge heights, plus the two boundary candidates (all-singleton below the smallest merge, single-cluster above the largest). Full observed range, not an assumed grid.",
+  "candidate_count": 1773,
+  "selection_metric": "ARI (primary), NMI (tie-break), widest stable merge-height interval (tie-break), smaller threshold (final tie-break)",
+  "selected_distance_threshold": 0.6074221086898255,
+  "calibration_metrics": {
+    "ari": 0.9989119953660992,
+    "nmi": 0.9983449360056419,
+    "purity": 1.0,
+    "silhouette": 0.5394726991653442,
+    "cluster_count": 11
+  },
+  "holdout_metrics": {
+    "ari": 0.9991962464649188,
+    "nmi": 0.9986317556346057,
+    "purity": 1.0,
+    "cluster_count": 18,
+    "silhouette": 0.5239245295524597
+  },
+  "pair_eer_threshold_comparison": {
+    "eer_threshold": 0.3843278586864471,
+    "one_minus_eer_distance": 0.6156721413135529,
+    "note": "Reference only. Not used to select the clustering threshold."
+  }
+}

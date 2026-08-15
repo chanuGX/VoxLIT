@@ -1,0 +1,36 @@
+{
+  "model_key": "ecapa",
+  "model_id": "speechbrain/spkrec-ecapa-voxceleb",
+  "embedding_dimension": 192,
+  "embeddings_source_dir": "outputs\\embeddings\\ecapa",
+  "linkage": "average",
+  "distance_metric": "cosine_precomputed",
+  "split_strategy": "Existing speaker-disjoint calibration/test split from utterances.csv. Threshold selected on 'calibration' only; evaluated once on 'test' as holdout.",
+  "calibration_speaker_count": 9,
+  "calibration_recording_count": 1779,
+  "holdout_speaker_count": 15,
+  "holdout_recording_count": 3078,
+  "search_method": "Merge-distance derived candidates: one per midpoint between consecutive unique average-linkage merge heights, plus the two boundary candidates (all-singleton below the smallest merge, single-cluster above the largest). Full observed range, not an assumed grid.",
+  "candidate_count": 1774,
+  "selection_metric": "ARI (primary), NMI (tie-break), widest stable merge-height interval (tie-break), smaller threshold (final tie-break)",
+  "selected_distance_threshold": 0.6493500404172964,
+  "calibration_metrics": {
+    "ari": 0.9989119953660992,
+    "nmi": 0.9983449360056419,
+    "purity": 1.0,
+    "silhouette": 0.5656070709228516,
+    "cluster_count": 11
+  },
+  "holdout_metrics": {
+    "ari": 0.9996475587562372,
+    "nmi": 0.9993724340688209,
+    "purity": 1.0,
+    "cluster_count": 16,
+    "silhouette": 0.5699731111526489
+  },
+  "pair_eer_threshold_comparison": {
+    "eer_threshold": 0.3578562438488006,
+    "one_minus_eer_distance": 0.6421437561511993,
+    "note": "Reference only. Not used to select the clustering threshold."
+  }
+}
