@@ -830,7 +830,10 @@ async def test_perturbation_endpoint_original_embedding_cache_miss_stores_value(
         response = await client.post("/tasks/verification/perturbation", json=payload)
 
     assert response.status_code == 200
-    assert mock_compare.call_args.args[-1] is None  # cached_original_embedding: miss
+    # cached_original_embedding must be passed by keyword (it's keyword-only
+    # on the real function) -- never positionally, and never among `.args`.
+    assert len(mock_compare.call_args.args) == 5
+    assert mock_compare.call_args.kwargs["cached_original_embedding"] is None  # miss
 
     audio_path = dataset.resolve_recording_path(recording_id)
     audio_hash = cache.hash_audio_files([audio_path])[0]
@@ -872,7 +875,9 @@ async def test_perturbation_endpoint_original_embedding_cache_hit_skips_recomput
         response = await client.post("/tasks/verification/perturbation", json=payload)
 
     assert response.status_code == 200
-    cached_arg = mock_compare.call_args.args[-1]
+    # cached_original_embedding must be passed by keyword, not positionally.
+    assert len(mock_compare.call_args.args) == 5
+    cached_arg = mock_compare.call_args.kwargs["cached_original_embedding"]
     assert cached_arg is not None
     assert torch.allclose(cached_arg, stored, atol=1e-5)
 
@@ -904,4 +909,103 @@ async def test_perturbation_endpoint_corrupted_cache_treated_as_miss(client, fak
         response = await client.post("/tasks/verification/perturbation", json=payload)
 
     assert response.status_code == 200
-    assert mock_compare.call_args.args[-1] is None  # corrupted hit -> treated as miss
+    # cached_original_embedding must be passed by keyword, not positionally.
+    assert len(mock_compare.call_args.args) == 5
+    assert mock_compare.call_args.kwargs["cached_original_embedding"] is None  # corrupted hit -> treated as miss
+
+
+# --------------------------------------------------------------------------
+# Regression: router must call the REAL `perturb_and_compare` with the
+# correct (keyword-only) signature. These deliberately do NOT mock
+# `perturb_and_compare` itself -- only the model adapter -- so a call-site
+# bug like passing `cached_original_embedding` positionally raises the same
+# `TypeError` here that it did in production, instead of being masked by a
+# full-function mock whose fake signature happily accepts either calling
+# convention.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_perturbation_endpoint_real_signature_cache_miss(monkeypatch, client, fake_dataset_dir):
+    monkeypatch.setattr(service, "get_model_spec", lambda _: ECAPA_SPEC)
+    monkeypatch.setattr(service, "get_model", lambda _: _HashDerivedAdapter(ECAPA_SPEC.embedding_dimension))
+
+    recording_id = fake_dataset_dir[0]
+    payload = {
+        "model": "ecapa-tdnn",
+        "recording_id": recording_id,
+        "perturbation": {"type": "noise", "params": {"noise_level": 0.05}},
+    }
+    response = await client.post("/tasks/verification/perturbation", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "similarity" in body
+    assert "embedding_shift" in body
+    assert body["session_asset"]["asset_id"].startswith("asset_")
+
+
+@pytest.mark.asyncio
+async def test_perturbation_endpoint_real_signature_cache_hit(monkeypatch, client, fake_dataset_dir):
+    monkeypatch.setattr(service, "get_model_spec", lambda _: ECAPA_SPEC)
+    monkeypatch.setattr(service, "get_model", lambda _: _HashDerivedAdapter(ECAPA_SPEC.embedding_dimension))
+
+    recording_id = fake_dataset_dir[0]
+    audio_path = dataset.resolve_recording_path(recording_id)
+    audio_hash = cache.hash_audio_files([audio_path])[0]
+    key = cache.embedding_cache_key(
+        model_key="ecapa-tdnn",
+        model_id=ECAPA_SPEC.model_id,
+        revision=ECAPA_SPEC.revision,
+        preprocessing_version=service.PREPROCESSING_VERSION,
+        audio_sha256=audio_hash,
+    )
+    dim = ECAPA_SPEC.embedding_dimension
+    stored = F.normalize(torch.tensor([1.0] + [0.0] * (dim - 1)), p=2, dim=0)
+    await cache.set_embedding(key, "ecapa-tdnn", stored.tolist())
+
+    payload = {
+        "model": "ecapa-tdnn",
+        "recording_id": recording_id,
+        "perturbation": {"type": "noise", "params": {"noise_level": 0.05}},
+    }
+    response = await client.post("/tasks/verification/perturbation", json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "similarity" in body
+    assert "embedding_shift" in body
+
+
+@pytest.mark.asyncio
+async def test_perturbation_endpoint_unexpected_exception_cleans_up_temp_file(
+    client, fake_dataset_dir, tmp_path, monkeypatch
+):
+    """Regression guard: an exception type other than ValueError/RuntimeError
+    (the TypeError this bug produced, in particular) must still clean up the
+    temp path allocated before `perturb_and_compare` ran."""
+
+    monkeypatch.setattr("app.tasks.verification.session_assets._storage_root", lambda: tmp_path)
+
+    # Establish the session on a request that succeeds, so the sid is known
+    # even though the erroring request below never gets far enough for
+    # SessionMiddleware to append a Set-Cookie header.
+    models_response = await client.get("/tasks/verification/models")
+    sid = models_response.cookies.get(settings.SESSION_COOKIE_NAME)
+    assert sid is not None
+
+    payload = {
+        "model": "ecapa-tdnn",
+        "recording_id": fake_dataset_dir[0],
+        "perturbation": {"type": "noise", "params": {"noise_level": 0.05}},
+    }
+    with patch(
+        "app.tasks.verification.router.perturb_and_compare",
+        side_effect=TypeError("perturb_and_compare() takes 5 positional arguments but 6 were given"),
+    ):
+        with pytest.raises(TypeError):
+            await client.post("/tasks/verification/perturbation", json=payload)
+
+    session_dir = tmp_path / sid
+    leftover = list(session_dir.iterdir()) if session_dir.is_dir() else []
+    assert leftover == []

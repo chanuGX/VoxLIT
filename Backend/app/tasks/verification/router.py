@@ -593,12 +593,18 @@ async def run_perturbation_comparison(payload: PerturbationRequest, request: Req
             payload.perturbation.type,
             payload.perturbation.params,
             temp_path,
-            cached_embedding,
+            cached_original_embedding=cached_embedding,
         )
     except (ValueError, RuntimeError) as error:
         await run_in_threadpool(temp_path.unlink, missing_ok=True)
         status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
         raise HTTPException(status_code=status, detail=str(error)) from error
+    except Exception:
+        # Any other exception (e.g. a bad call signature, an adapter bug) must
+        # still clean up the allocated temp path before propagating -- not
+        # just the two expected error types above.
+        await run_in_threadpool(temp_path.unlink, missing_ok=True)
+        raise
 
     if cached_embedding is None:
         await cache.set_embedding(embedding_key, payload.model, result.pop("original_embedding"))
