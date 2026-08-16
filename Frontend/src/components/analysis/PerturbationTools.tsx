@@ -10,6 +10,7 @@ import { RangeSlider } from "@/components/ui/range-slider"
 import { Volume2, Scissors, Plus, Play, Zap, Loader2, CheckCircle, XCircle } from "lucide-react"
 import { WaveformViewer } from "../audio/WaveformViewer"
 import { API_BASE } from '@/lib/api'
+import type { SessionAssetMetadata } from '@/tasks/types'
 
 interface UploadedFile {
   file_id: string;
@@ -36,6 +37,35 @@ interface PerturbationResult {
   error?: string;
 }
 
+// Speaker Verification perturbation mode — a distinct explanation surface
+// from the generic perturb-and-replay flow above. It runs exactly one
+// perturbation against exactly one currently selected recording (a demo
+// `rec_...` or session `asset_...` id), and the backend always registers the
+// perturbed clip as a new session asset in the same response.
+export interface PerturbationApiResponse {
+  model: string;
+  model_label: string;
+  threshold: number;
+  perturbation: { type: string; params: Record<string, number> };
+  similarity: number;
+  same_speaker: boolean;
+  embedding_shift: number;
+  source_recording_id: string;
+  session_asset: SessionAssetMetadata;
+}
+
+export interface VerificationPerturbationContext {
+  model: string;
+  /** The single currently selected recording (table row or embedding-graph
+   *  point) — a demo `rec_...` or session `asset_...` id. Null if none selected. */
+  selectedRecordingId: string | null;
+  /** Display label for the selected recording, for UI purposes only. */
+  selectedRecordingLabel: string | null;
+  /** Called after a successful perturbation so the caller can append the new
+   *  session asset to shared state and make it the active recording. */
+  onPerturbationApplied: (result: PerturbationApiResponse) => void;
+}
+
 interface PerturbationToolsProps {
   selectedFile: UploadedFile | null;
   onPerturbationComplete?: (result: PerturbationResult) => void;
@@ -43,6 +73,10 @@ interface PerturbationToolsProps {
   model?: string;
   dataset?: string;
   originalDataset?: string;
+  /** Speaker Verification perturbation mode. When set, this component runs
+   *  the single-recording /tasks/verification/perturbation flow instead of
+   *  the generic /perturb flow, and every other task's rendering is unaffected. */
+  verification?: VerificationPerturbationContext;
 }
 
 // Helper function to generate correct audio URL for original files
@@ -102,6 +136,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   model,
   dataset,
   originalDataset,
+  verification,
 }) => {
   // Perturbation parameters
   const [noiseLevel, setNoiseLevel] = useState([10])
@@ -122,14 +157,150 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   const [perturbationResult, setPerturbationResult] = useState<PerturbationResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // Verification-perturbation-mode state (unused unless `verification` is set)
+  const [verificationResult, setVerificationResult] = useState<PerturbationApiResponse | null>(null)
+  const [verificationError, setVerificationError] = useState<string | null>(null)
+  const [isRunningVerificationPerturbation, setIsRunningVerificationPerturbation] = useState(false)
+  const verificationAbortRef = React.useRef<AbortController | null>(null)
+
   // Clear perturbation results when selected file changes
   useEffect(() => {
     setPerturbationResult(null);
     setError(null);
   }, [selectedFile]);
 
+  const activeRobustnessType: "noise" | "time_masking" | "pitch_shift" | "time_stretch" | null =
+    !verification
+      ? null
+      : selectedPerturbations.noise
+      ? "noise"
+      : selectedPerturbations.timeMasking
+      ? "time_masking"
+      : selectedPerturbations.pitchShift
+      ? "pitch_shift"
+      : selectedPerturbations.timeStretch
+      ? "time_stretch"
+      : null;
+
+  const activeRobustnessParamValue =
+    activeRobustnessType === "noise"
+      ? noiseLevel[0]
+      : activeRobustnessType === "time_masking"
+      ? `${maskRange[0]}-${maskRange[1]}`
+      : activeRobustnessType === "pitch_shift"
+      ? pitchShift[0]
+      : activeRobustnessType === "time_stretch"
+      ? timeStretch[0]
+      : null;
+
+  const verificationDepsKey = verification
+    ? [verification.model, verification.selectedRecordingId ?? ""].join("|")
+    : "";
+
+  // Any change to the model, selected source, perturbation type, or its
+  // parameter value invalidates the current result — abort any in-flight
+  // request and clear stale state.
+  useEffect(() => {
+    if (!verification) return;
+    if (verificationAbortRef.current) {
+      verificationAbortRef.current.abort();
+      verificationAbortRef.current = null;
+    }
+    setVerificationResult(null);
+    setVerificationError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verification, verificationDepsKey, activeRobustnessType, activeRobustnessParamValue]);
+
+  const verificationValidationMessage = (): string | null => {
+    if (!verification) return null;
+    if (!verification.selectedRecordingId) {
+      return "Select a recording from the Audio Dataset table or the embedding graph to perturb.";
+    }
+    if (!activeRobustnessType) {
+      return "Select exactly one perturbation type.";
+    }
+    if (activeRobustnessType === "noise" && noiseLevel[0] <= 0) {
+      return "Noise level must be greater than 0%.";
+    }
+    if (activeRobustnessType === "time_masking" && maskRange[0] >= maskRange[1]) {
+      return "Mask start must be before mask end.";
+    }
+    if (activeRobustnessType === "pitch_shift" && pitchShift[0] === 0) {
+      return "Choose a non-zero pitch shift.";
+    }
+    if (activeRobustnessType === "time_stretch" && timeStretch[0] === 100) {
+      return "Choose a stretch factor other than 100%.";
+    }
+    return null;
+  };
+
+  const buildVerificationParams = (): Record<string, number> | null => {
+    if (activeRobustnessType === "noise") return { noise_level: noiseLevel[0] / 100 };
+    if (activeRobustnessType === "time_masking") return { mask_start_percent: maskRange[0], mask_end_percent: maskRange[1] };
+    if (activeRobustnessType === "pitch_shift") return { pitch_shift_semitones: pitchShift[0] };
+    if (activeRobustnessType === "time_stretch") return { stretch_factor: timeStretch[0] / 100 };
+    return null;
+  };
+
+  const runVerificationPerturbation = async () => {
+    if (!verification) return;
+    const validationMessage = verificationValidationMessage();
+    if (validationMessage) {
+      setVerificationError(validationMessage);
+      return;
+    }
+    const params = buildVerificationParams();
+    if (!activeRobustnessType || !params || !verification.selectedRecordingId) return;
+
+    if (verificationAbortRef.current) {
+      verificationAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    verificationAbortRef.current = controller;
+
+    setIsRunningVerificationPerturbation(true);
+    setVerificationError(null);
+    setVerificationResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/tasks/verification/perturbation`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: verification.model,
+          recording_id: verification.selectedRecordingId,
+          perturbation: { type: activeRobustnessType, params },
+        }),
+        signal: controller.signal,
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || `Perturbation failed (${response.status}).`);
+      }
+      const result = payload as PerturbationApiResponse;
+      setVerificationResult(result);
+      verification.onPerturbationApplied(result);
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      setVerificationError(caught instanceof Error ? caught.message : "Perturbation failed.");
+    } finally {
+      setIsRunningVerificationPerturbation(false);
+      if (verificationAbortRef.current === controller) {
+        verificationAbortRef.current = null;
+      }
+    }
+  };
+
   const handlePerturbationToggle = (perturbationType: keyof typeof selectedPerturbations) => {
     setSelectedPerturbations(prev => {
+      if (verification) {
+        // Exactly one perturbation is allowed per request.
+        const next = { noise: false, timeMasking: false, pitchShift: false, timeStretch: false };
+        next[perturbationType] = !prev[perturbationType];
+        return next;
+      }
       const newState = {
         ...prev,
         [perturbationType]: !prev[perturbationType]
@@ -287,12 +458,35 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
   return (
     <div className="space-y-4">
       {/* Error Display */}
-      {error && (
+      {(verification ? verificationError : error) && (
         <Card className="border-destructive/20 bg-destructive/5">
           <CardContent className="pt-4">
             <div className="flex items-center gap-2 text-destructive text-xs">
               <XCircle className="h-4 w-4" />
-              {error}
+              {verification ? verificationError : error}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Speaker Verification perturbation context — status/help text lives
+          here, scoped to this component's verification branch. */}
+      {verification && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Speaker Verification Perturbation</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-xs">
+            <p className="text-muted-foreground">
+              Applies one perturbation to the selected recording and re-extracts its embedding
+              to compare against the original. The perturbed clip is saved as a new recording you
+              can select, play, and perturb again.
+            </p>
+            <div>
+              <span className="font-medium">Selected recording: </span>
+              {verification.selectedRecordingId
+                ? (verification.selectedRecordingLabel ?? verification.selectedRecordingId)
+                : "none selected — click a row in the Audio Dataset table or a point in the embedding graph."}
             </div>
           </CardContent>
         </Card>
@@ -491,35 +685,112 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
         </CardContent>
       </Card>
 
-      {/* Apply Perturbations Button */}
+      {/* Apply Perturbations / Run Perturbation Button */}
       <Card>
         <CardContent className="pt-4">
-          <Button
-            onClick={handleAddPerturbations}
-            disabled={isLoading || !selectedFile || !Object.values(selectedPerturbations).some(Boolean)}
-            className="w-full h-10 bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md"
-            size="lg"
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-            ) : (
-              <Zap className="h-4 w-4 mr-2" />
-            )}
-            {isLoading ? "Applying Perturbations..." : "Apply Perturbations"}
-          </Button>
-          <p className="text-xs text-muted-foreground mt-2 text-center">
-            {!selectedFile 
-              ? "Select a file to apply perturbations"
-              : !Object.values(selectedPerturbations).some(Boolean)
-              ? "Select at least one perturbation type"
-              : `Apply perturbations to ${selectedFile.filename}`
-            }
-          </p>
+          {verification ? (
+            <>
+              <Button
+                onClick={runVerificationPerturbation}
+                disabled={isRunningVerificationPerturbation || !!verificationValidationMessage()}
+                className="w-full h-10 bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md"
+                size="lg"
+              >
+                {isRunningVerificationPerturbation ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Zap className="h-4 w-4 mr-2" />
+                )}
+                {isRunningVerificationPerturbation ? "Applying perturbation…" : "Run Perturbation"}
+              </Button>
+              <p className="text-xs text-muted-foreground mt-2 text-center">
+                {verificationValidationMessage() ?? "Ready to run the perturbation."}
+              </p>
+            </>
+          ) : (
+            <>
+              <Button
+                onClick={handleAddPerturbations}
+                disabled={isLoading || !selectedFile || !Object.values(selectedPerturbations).some(Boolean)}
+                className="w-full h-10 bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md"
+                size="lg"
+              >
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Zap className="h-4 w-4 mr-2" />
+                )}
+                {isLoading ? "Applying Perturbations..." : "Apply Perturbations"}
+              </Button>
+              <p className="text-xs text-muted-foreground mt-2 text-center">
+                {!selectedFile
+                  ? "Select a file to apply perturbations"
+                  : !Object.values(selectedPerturbations).some(Boolean)
+                  ? "Select at least one perturbation type"
+                  : `Apply perturbations to ${selectedFile.filename}`
+                }
+              </p>
+            </>
+          )}
         </CardContent>
       </Card>
 
+      {/* Perturbation Result — Speaker Verification only. The perturbed clip
+          is already saved as a new session asset (see the status card above /
+          the auto-selected recording); this card never shows a
+          confidence/probability framing, only the raw similarity/threshold. */}
+      {verification && verificationResult && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm flex items-center gap-2">
+              Perturbation Result
+              <Badge variant={verificationResult.same_speaker ? "secondary" : "destructive"} className="text-[10px]">
+                {verificationResult.same_speaker ? "Same speaker" : "Different speaker"}
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-xs">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-muted-foreground">Model</span>
+                <div className="font-medium">{verificationResult.model_label}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Perturbation</span>
+                <div className="font-medium">
+                  {verificationResult.perturbation.type.replace("_", " ")} —{" "}
+                  {Object.entries(verificationResult.perturbation.params)
+                    .map(([key, value]) => `${key}: ${value}`)
+                    .join(", ")}
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <span className="text-muted-foreground">Cosine similarity</span>
+                <div className="font-mono font-medium">{verificationResult.similarity.toFixed(4)}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Model threshold</span>
+                <div className="font-mono font-medium">{verificationResult.threshold.toFixed(4)}</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 border-t pt-2">
+              <div>
+                <span className="text-muted-foreground">Embedding shift</span>
+                <div className="font-mono font-medium">{verificationResult.embedding_shift.toFixed(4)}</div>
+              </div>
+              <div>
+                <span className="text-muted-foreground">New recording</span>
+                <div className="font-medium truncate">{verificationResult.session_asset.display_filename}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Waveform Visualization */}
-      {(selectedFile || perturbationResult) && (
+      {!verification && (selectedFile || perturbationResult) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Audio Waveforms</CardTitle>
@@ -555,7 +826,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       )}
 
       {/* Results */}
-      {perturbationResult && (
+      {!verification && perturbationResult && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">

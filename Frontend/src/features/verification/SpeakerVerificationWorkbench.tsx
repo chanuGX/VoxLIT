@@ -8,6 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BatchAnalysisPanel } from "./BatchAnalysisPanel";
+import { PerturbationTools, type VerificationPerturbationContext } from "@/components/analysis/PerturbationTools";
 import type { WorkbenchCenterProps } from "@/tasks/types";
 
 type SpeakerVerificationWorkbenchProps = WorkbenchCenterProps;
@@ -61,10 +62,13 @@ export const SpeakerVerificationWorkbench = ({
   dataset,
   originalDataset,
   uploadedRawFiles,
+  selectedFile,
   selectedBatchIds,
   pairSelection,
+  datasetRecordings,
   onReprojectHandlerChange,
   onLabelResolverChange,
+  onVerificationAssetCreated,
 }: SpeakerVerificationWorkbenchProps) => {
   const [enrollmentFiles, setEnrollmentFiles] = useState<File[]>([]);
   const [probeFile, setProbeFile] = useState<File | null>(null);
@@ -73,6 +77,99 @@ export const SpeakerVerificationWorkbench = ({
   const [isRunning, setIsRunning] = useState(false);
   const [isExplaining, setIsExplaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Resolve an opaque recording_id (rec_... or asset_...) to a display label
+  // via the merged demo+session-asset list, falling back to the id itself.
+  const resolveRecordingLabel = (id: string): string =>
+    datasetRecordings?.find((r) => r.recording_id === id)?.display_filename ?? id;
+
+  // ID-based ("workspace selections") Pair Verification + temporal
+  // occlusion — reuses the same shared enrollment/probe selection concept as
+  // Batch Analysis (checked rows) and the rest of the app (the currently
+  // selected table row / graph point), feeding the same result/occlusion
+  // state as the upload-based flow above so the results UI needs no
+  // duplication. Never mixes ids and uploaded files in one request.
+  const idModeEnrollmentIds = selectedBatchIds;
+  const idModeProbeId = selectedFile?.file_id ?? null;
+  const idModeProbeIsEnrollment = !!idModeProbeId && idModeEnrollmentIds.includes(idModeProbeId);
+  const idModeValidationMessage: string | null =
+    idModeEnrollmentIds.length < 3 || idModeEnrollmentIds.length > 5
+      ? "Check 3-5 rows in the Audio Dataset table as enrollment recordings."
+      : !idModeProbeId
+        ? "Select a probe recording (click a row or a graph point) that is not part of the enrollment set."
+        : idModeProbeIsEnrollment
+          ? "The probe recording must not also be a checked enrollment recording."
+          : null;
+  const canRunIdMode = !idModeValidationMessage && !!model;
+
+  const runVerificationById = async () => {
+    if (!canRunIdMode || !idModeProbeId) return;
+
+    const formData = new FormData();
+    formData.append("model", model);
+    idModeEnrollmentIds.forEach((id) => formData.append("enrollment_recording_ids", id));
+    formData.append("probe_recording_id", idModeProbeId);
+
+    setIsRunning(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/tasks/verification/verify`, {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || `Verification failed (${response.status})`);
+      }
+      setResult(payload as VerificationResult);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Speaker verification failed.");
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const runTemporalOcclusionById = async () => {
+    if (!canRunIdMode || !idModeProbeId) return;
+
+    const formData = new FormData();
+    formData.append("model", model);
+    formData.append("segment_count", "8");
+    idModeEnrollmentIds.forEach((id) => formData.append("enrollment_recording_ids", id));
+    formData.append("probe_recording_id", idModeProbeId);
+
+    setIsExplaining(true);
+    setOcclusion(null);
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/tasks/verification/explain/temporal-occlusion`, {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || `Temporal occlusion failed (${response.status})`);
+      }
+      setOcclusion(payload as OcclusionResult);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Temporal occlusion failed.");
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
+  // Perturbation tab context — single currently selected recording, driven
+  // by the same shared selectedFile the rest of the app uses.
+  const verificationPerturbationContext: VerificationPerturbationContext = {
+    model,
+    selectedRecordingId: selectedFile?.file_id ?? null,
+    selectedRecordingLabel: selectedFile?.file_id ? resolveRecordingLabel(selectedFile.file_id) : null,
+    onPerturbationApplied: (result) => onVerificationAssetCreated(result.session_asset),
+  };
 
   useEffect(() => {
     setResult(null);
@@ -179,6 +276,7 @@ export const SpeakerVerificationWorkbench = ({
           <TabsList>
             <TabsTrigger value="pair-verification">Pair Verification</TabsTrigger>
             <TabsTrigger value="batch-analysis">Batch Analysis</TabsTrigger>
+            <TabsTrigger value="perturbation">Perturbation</TabsTrigger>
           </TabsList>
 
           <TabsContent value="pair-verification" className="space-y-4">
@@ -233,6 +331,54 @@ export const SpeakerVerificationWorkbench = ({
             </CardContent>
           </Card>
         </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Users className="h-4 w-4" /> Or verify using workspace selections
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="text-xs">
+              <span className="font-medium">
+                Enrollment ({idModeEnrollmentIds.length}/5 checked, need 3-5):
+              </span>
+              {idModeEnrollmentIds.length > 0 ? (
+                <ul className="list-disc pl-4 mt-1 text-muted-foreground">
+                  {idModeEnrollmentIds.map((id) => (
+                    <li key={id} className="truncate">{resolveRecordingLabel(id)}</li>
+                  ))}
+                </ul>
+              ) : (
+                <span className="text-muted-foreground"> check rows in the Audio Dataset table below</span>
+              )}
+            </div>
+            <div className="text-xs">
+              <span className="font-medium">Probe: </span>
+              <span className={idModeProbeIsEnrollment ? "text-destructive" : "text-muted-foreground"}>
+                {idModeProbeId
+                  ? resolveRecordingLabel(idModeProbeId)
+                  : "none selected — click a row in the Audio Dataset table or a graph point."}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              <Button className="flex-1" disabled={!canRunIdMode || isRunning} onClick={runVerificationById}>
+                {isRunning ? "Extracting embeddings…" : "Verify speaker (selections)"}
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1"
+                disabled={!canRunIdMode || isExplaining}
+                onClick={runTemporalOcclusionById}
+              >
+                {isExplaining ? "Running 8 occlusion passes…" : "Run temporal occlusion (selections)"}
+              </Button>
+            </div>
+            {idModeValidationMessage && (
+              <p className="text-xs text-muted-foreground">{idModeValidationMessage}</p>
+            )}
+          </CardContent>
+        </Card>
 
         {error && (
           <Alert variant="destructive">
@@ -350,6 +496,10 @@ export const SpeakerVerificationWorkbench = ({
               onReprojectHandlerChange={onReprojectHandlerChange}
               onLabelResolverChange={onLabelResolverChange}
             />
+          </TabsContent>
+
+          <TabsContent value="perturbation" forceMount className="space-y-4 data-[state=inactive]:hidden">
+            <PerturbationTools selectedFile={null} verification={verificationPerturbationContext} />
           </TabsContent>
         </Tabs>
       </div>

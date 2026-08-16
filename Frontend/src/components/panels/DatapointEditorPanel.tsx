@@ -80,9 +80,13 @@ export const DatapointEditorPanel = ({
     // same as "no file selected") if the id hasn't resolved against the
     // loaded recording list yet.
     if (isDemoDatasetPlayback) {
-      return demoRecording
-        ? `${API_BASE}/tasks/verification/dataset/recordings/${encodeURIComponent(demoRecording.recording_id)}/audio`
-        : undefined;
+      if (!demoRecording) return undefined;
+      // Session-scoped assets (uploads + perturbation outputs) stream through
+      // a different route than demo recordings — distinguished by id prefix.
+      const isSessionAsset = demoRecording.recording_id.startsWith('asset_');
+      return isSessionAsset
+        ? `${API_BASE}/tasks/verification/session-assets/${encodeURIComponent(demoRecording.recording_id)}/audio`
+        : `${API_BASE}/tasks/verification/dataset/recordings/${encodeURIComponent(demoRecording.recording_id)}/audio`;
     }
 
     // If showing perturbed audio and it's available
@@ -358,6 +362,7 @@ export const DatapointEditorPanel = ({
             <WaveformViewer
               audioUrl={audioUrl}
               isPlaying={isPlaying}
+              requireCredentials={isDemoDatasetPlayback}
               onReady={(wavesurfer) => {
 
                 wavesurferRef.current = wavesurfer;

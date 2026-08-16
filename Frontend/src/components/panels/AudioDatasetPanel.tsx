@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +48,9 @@ interface AudioDatasetPanelProps {
   /** Verification-only: receives the raw safe recording list whenever the
    *  demo dataset's metadata is (re)loaded via the safe endpoint. */
   onVerificationRecordingsChange?: (recordings: DatasetRecordingRef[]) => void;
+  /** Verification-only: session-scoped assets (uploads + perturbation
+   *  outputs) to render as extra rows alongside the demo dataset. */
+  sessionAssets?: DatasetRecordingRef[];
 }
 
 export const AudioDatasetPanel = ({ 
@@ -69,12 +72,29 @@ export const AudioDatasetPanel = ({
   checkedIds,
   onCheckedIdsChange,
   onVerificationRecordingsChange,
+  sessionAssets,
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [datasetMetadata, setDatasetMetadata] = useState<Record<string, string | number>[]>([]);
+
+  // Verification-only: append session assets (uploads + perturbation
+  // outputs) as extra rows after the demo dataset rows, in the same
+  // {id, filename, extension, size_bytes} shape already used for those rows,
+  // so they're clickable/checkable/highlightable identically. Byte-identical
+  // to `datasetMetadata` for every other selectionVariant.
+  const tableRows = useMemo(() => {
+    if (selectionVariant !== 'verification' || !sessionAssets?.length) return datasetMetadata;
+    const assetRows = sessionAssets.map((a) => ({
+      id: a.recording_id,
+      filename: a.display_filename,
+      extension: a.extension,
+      size_bytes: a.size_bytes,
+    }));
+    return [...datasetMetadata, ...assetRows];
+  }, [selectionVariant, datasetMetadata, sessionAssets]);
   // Use external predictionMap from parent
   const predictionMap = externalPredictionMap || {};
   const [inferenceStatus, setInferenceStatus] = useState<Record<string, 'idle' | 'loading' | 'done' | 'error'>>({});
@@ -96,20 +116,20 @@ export const AudioDatasetPanel = ({
       }
       
       // For dataset files, find matching row by filename
-      if (datasetMetadata.length > 0) {
-        const matchingRow = datasetMetadata.find(row => {
+      if (tableRows.length > 0) {
+        const matchingRow = tableRows.find(row => {
           const pathVal = (row["path"] || row["filepath"] || row["file"] || row["filename"]) as string;
           const filename = pathVal ? (pathVal.split("/").pop() || pathVal.split("\\").pop() || pathVal) : String(row["id"]);
           return filename === selectedFile.filename;
         });
-        
+
         if (matchingRow) {
           const rowId = String(matchingRow["id"] || matchingRow["path"] || matchingRow["filepath"] || matchingRow["file"] || matchingRow["filename"]);
           setSelectedRow(rowId);
         }
       }
     }
-  }, [selectedFile, uploadedFiles, datasetMetadata]);
+  }, [selectedFile, uploadedFiles, tableRows]);
 
   // Stable handlers to prevent downstream re-renders
   const handleRowSelect = useCallback((id: string) => {
@@ -132,8 +152,8 @@ export const AudioDatasetPanel = ({
     }
 
     const findMatch = () => {
-      for (const row of datasetMetadata) {
-        const rowId = row["id"]; 
+      for (const row of tableRows) {
+        const rowId = row["id"];
         const path = row["path"] || row["filepath"] || row["file"] || row["filename"];
         if (typeof rowId === "string" && rowId === id) return row;
         if (typeof path === "string" && (path === id || path.endsWith(`/${id}`) || path.endsWith(`\\${id}`))) return row;
@@ -156,7 +176,7 @@ export const AudioDatasetPanel = ({
 
     // Just select the file for UI purposes, no inference
     onFileSelect(fileLike);
-  }, [dataset, datasetMetadata, onFileSelect]);
+  }, [dataset, tableRows, onFileSelect]);
 
   const handleFilePlay = useCallback((file: UploadedFile) => {
     if (onFileSelect) {
@@ -694,7 +714,7 @@ export const AudioDatasetPanel = ({
               apiData={apiData}
               model={model ?? ""}
               dataset={dataset}
-              datasetMetadata={datasetMetadata}
+              datasetMetadata={tableRows}
               uploadedFiles={uploadedFiles}
               onFilePlay={handleFilePlay}
               predictionMap={predictionMap}

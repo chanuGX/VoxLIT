@@ -6,7 +6,7 @@ import { EmbeddingPanel } from "../panels/EmbeddingPanel";
 import { AudioDatasetPanel } from "../panels/AudioDatasetPanel";
 import { DatapointEditorPanel } from "../panels/DatapointEditorPanel";
 import { EmbeddingProvider } from "../../contexts/EmbeddingContext";
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { API_BASE } from '@/lib/api';
 import {
   TaskDefinition,
@@ -14,6 +14,7 @@ import {
   Wav2Vec2Prediction,
   WhisperPrediction,
   DatasetRecordingRef,
+  SessionAssetMetadata,
 } from '@/tasks/types';
 import { TASK_SLOTS, getModelLabel } from '@/tasks/registry';
 
@@ -43,9 +44,73 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [pairSelectionLabels, setPairSelectionLabels] = useState<string[]>([]);
   const [uploadedRawFiles, setUploadedRawFiles] = useState<Record<string, File>>({});
   const [datasetRecordings, setDatasetRecordings] = useState<DatasetRecordingRef[] | null>(null);
+  // Session-scoped assets (uploads + perturbation outputs), separate from
+  // `datasetRecordings` (demo-only, owned by AudioDatasetPanel's safe-listing
+  // effect) so neither source clobbers the other; merged for consumers below.
+  const [sessionAssets, setSessionAssets] = useState<DatasetRecordingRef[]>([]);
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [reprojectFn, setReprojectFn] = useState<((method: string, n: number) => void) | null>(null);
   const [labelResolverFn, setLabelResolverFn] = useState<((label: string) => string | undefined) | null>(null);
+
+  // Fetch previously created session assets once on load so they survive a
+  // page refresh — verification only.
+  useEffect(() => {
+    if (task.id !== 'verification') return;
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/tasks/verification/session-assets`, {
+          credentials: 'include',
+          signal: ac.signal,
+        });
+        if (!res.ok) return;
+        const data = await res.json() as { assets: SessionAssetMetadata[] };
+        setSessionAssets(
+          data.assets.map((a) => ({
+            recording_id: a.asset_id,
+            display_filename: a.display_filename,
+            extension: a.extension,
+            size_bytes: a.size_bytes,
+          }))
+        );
+      } catch (e) {
+        const name = (e as { name?: string } | null)?.name;
+        if (name !== 'AbortError') console.error(e);
+      }
+    })();
+    return () => ac.abort();
+  }, [task.id]);
+
+  // Demo recordings (safe-listed by AudioDatasetPanel) plus session assets —
+  // the merged "safe recording" list passed to any consumer that needs to
+  // resolve an opaque id (rec_... or asset_...) to a display label/size, or
+  // to play it back. Verification-only; empty/null for every other task.
+  const verificationRecordings = useMemo(
+    () => [...(datasetRecordings ?? []), ...sessionAssets],
+    [datasetRecordings, sessionAssets]
+  );
+
+  // Appends a newly created session asset (top-bar upload or a perturbation
+  // result) to shared state and makes it the selected/active recording, so
+  // it's immediately visible in the table and playable in the Datapoint
+  // Editor without a refresh or manual import.
+  const handleVerificationAssetCreated = useCallback((asset: SessionAssetMetadata) => {
+    const ref: DatasetRecordingRef = {
+      recording_id: asset.asset_id,
+      display_filename: asset.display_filename,
+      extension: asset.extension,
+      size_bytes: asset.size_bytes,
+    };
+    setSessionAssets((prev) => [...prev, ref]);
+    const fileLike: UploadedFile = {
+      file_id: ref.recording_id,
+      filename: ref.display_filename,
+      file_path: ref.display_filename,
+      message: "Selected from dataset",
+    };
+    setSelectedFile(fileLike);
+    setSelectedEmbeddingFile(ref.recording_id);
+  }, []);
 
   // useState's setter treats a bare function argument as a functional
   // updater, so storing a callback value itself must go through the wrapper
@@ -573,6 +638,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
           setDataset={setDataset}
           onBatchInference={handleBatchInference}
           onUploadSuccess={handleUploadSuccess}
+          onVerificationAssetUpload={handleVerificationAssetCreated}
         />
 
         {/* Main Content Area */}
@@ -614,11 +680,12 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                       onFileSelect={handleFileSelection}
                       pairSelection={pairSelectionLabels}
                       onClearPairSelection={() => setPairSelectionLabels([])}
-                      datasetRecordings={datasetRecordings}
+                      datasetRecordings={verificationRecordings}
                       selectedBatchIds={selectedBatchIds}
                       onSelectedBatchIdsChange={setSelectedBatchIds}
                       onReprojectHandlerChange={registerReprojectHandler}
                       onLabelResolverChange={registerLabelResolver}
+                      onVerificationAssetCreated={handleVerificationAssetCreated}
                     />
                   ) : task.status === "active" ? (
                     <ExplainabilityPanel
@@ -660,6 +727,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                     checkedIds={selectedBatchIds}
                     onCheckedIdsChange={setSelectedBatchIds}
                     onVerificationRecordingsChange={setDatasetRecordings}
+                    sessionAssets={sessionAssets}
                   />
                 </Panel>
               </PanelGroup>
@@ -677,7 +745,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 perturbationResult={perturbationResult}
                 predictionMap={predictionMap}
                 renderPredictionResults={renderPredictionResults}
-                datasetRecordings={datasetRecordings}
+                datasetRecordings={verificationRecordings}
               />
             </Panel>
           </PanelGroup>

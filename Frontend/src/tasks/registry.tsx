@@ -94,7 +94,7 @@ export const TASKS: TaskDefinition[] = [
     capabilities: {
       saliency: false,
       attention: false,
-      perturbation: false,
+      perturbation: true,
       resultKind: null,
       batchAnalysis: null,
     },

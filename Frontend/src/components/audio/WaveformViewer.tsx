@@ -9,9 +9,18 @@ interface WaveformViewerProps {
   onProgress?: (currentTime: number, duration: number) => void;
   /** Called when playback reaches the end of the clip. */
   onFinish?: () => void;
+  /** Speaker Verification only: session-scoped audio (demo recordings and
+   *  session assets alike) is owned by the `sid` cookie. WaveSurfer's own
+   *  internal blob fetch never sends credentials for a cross-origin URL
+   *  unless explicitly configured -- this makes it do so, via WaveSurfer's
+   *  own `fetchParams` option, so it never silently starts (and gets
+   *  attributed to) a brand-new anonymous session. Omitted/false for every
+   *  other caller, which keeps their existing (uncredentialed) behavior
+   *  byte-for-byte unchanged. */
+  requireCredentials?: boolean;
 }
 
-export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFinish }: WaveformViewerProps) => {
+export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFinish, requireCredentials }: WaveformViewerProps) => {
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -46,6 +55,9 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFin
       barRadius: 1,
       cursorWidth: 1,
       hideScrollbar: true,
+      // WaveSurfer's own internal audio fetch (used by every `load()` call on
+      // this instance, not just the first) -- see `requireCredentials` above.
+      ...(requireCredentials ? { fetchParams: { credentials: 'include' as RequestCredentials } } : {}),
     });
 
     wavesurferRef.current = wavesurfer;
@@ -108,7 +120,7 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFin
         currentBlobUrlRef.current = null;
       }
     };
-  }, []); // Only run once when component mounts
+  }, [requireCredentials]); // Re-create only if credential requirements change; otherwise mount-once
 
   // Handle audio URL changes
   useEffect(() => {

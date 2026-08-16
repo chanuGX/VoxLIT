@@ -14,7 +14,7 @@ import { Upload, HelpCircle } from "lucide-react";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
 import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
-import { TaskDefinition, UploadedFile } from '@/tasks/types';
+import { TaskDefinition, UploadedFile, SessionAssetMetadata } from '@/tasks/types';
 
 interface ToolbarProps {
   task: TaskDefinition;
@@ -29,6 +29,9 @@ interface ToolbarProps {
   /** Single upload entry point — also used by AudioDatasetPanel's own
    *  (hideable) uploader so both feed the same shared uploadedFiles state. */
   onUploadSuccess?: (uploadResponse: UploadedFile, rawFile?: File) => void;
+  /** Speaker Verification only: routes uploads through the session-scoped
+   *  asset endpoint instead of the legacy /upload route. */
+  onVerificationAssetUpload?: (asset: SessionAssetMetadata) => void;
 }
 
 interface CustomDataset {
@@ -41,7 +44,7 @@ interface CustomDataset {
  * Registry-driven toolbar: model and dataset dropdowns come from the task
  * definition in src/tasks/registry.tsx — never hardcode options here.
  */
-export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, onUploadSuccess }: ToolbarProps) => {
+export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, onUploadSuccess, onVerificationAssetUpload }: ToolbarProps) => {
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,6 +53,33 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
   };
 
   const uploadFile = async (file: File) => {
+    // Speaker Verification uploads are session-scoped assets, not legacy
+    // uploads — a different endpoint, a different response shape, and no
+    // `model` field. Every other task is byte-identical to before.
+    if (task.id === 'verification') {
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const response = await fetch(`${API_BASE}/tasks/verification/session-assets/upload`, {
+          method: 'POST',
+          credentials: 'include',
+          body: formData,
+        });
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.detail || 'Upload failed');
+        }
+        const data = await response.json();
+        toast.success(`Uploaded: ${file.name}`);
+        onVerificationAssetUpload?.(data);
+      } catch (error) {
+        console.error('Upload error:', error);
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        toast.error(`Failed to upload ${file.name}: ${msg}`);
+      }
+      return;
+    }
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('model', model);

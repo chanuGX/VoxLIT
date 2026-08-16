@@ -127,6 +127,22 @@ export interface DatasetRecordingRef {
   size_bytes: number;
 }
 
+/** A session-scoped verification asset (upload or perturbation output), as
+ *  returned by POST/GET /tasks/verification/session-assets*. */
+export interface SessionAssetMetadata {
+  asset_id: string;
+  origin: "upload" | "perturbation";
+  display_filename: string;
+  extension: string;
+  size_bytes: number;
+  duration_seconds: number;
+  sample_rate: number;
+  source_asset_id: string | null;
+  model: string | null;
+  perturbation: { type: string; params: Record<string, number> } | null;
+  created_at: number;
+}
+
 /**
  * Props every WorkbenchCenter slot component receives. Mirrors the shared
  * selection/upload state TaskWorkbench already threads into AudioDatasetPanel
@@ -165,4 +181,10 @@ export interface WorkbenchCenterProps {
    *  selectedFile/Datapoint-Editor/Audio-Playback state. Never resolved from
    *  projected coordinates — always the index-aligned run-time submission order. */
   onLabelResolverChange: (resolver: ((label: string) => string | undefined) | null) => void;
+  /** Verification-only: call after a new session asset is created (top-bar
+   *  upload or a perturbation result) to append it to shared state and make
+   *  it the selected/active recording, immediately playable in the
+   *  Datapoint Editor. Takes the raw session-asset shape returned by both
+   *  the upload endpoint and a perturbation response's `session_asset`. */
+  onVerificationAssetCreated: (asset: SessionAssetMetadata) => void;
 }
