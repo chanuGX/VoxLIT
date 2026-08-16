@@ -4,11 +4,23 @@ import io
 import json
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+import soundfile as sf
 import torch
+from httpx import AsyncClient
 
 from app.core.settings import settings
+from app.main import app
 from app.tasks.verification import dataset, service
+
+
+def _wav_bytes(*, sample_rate: int = 16000, seconds: float = 1.0, freq: float = 220.0) -> bytes:
+    t = np.linspace(0, seconds, int(sample_rate * seconds), False)
+    audio = (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+    buffer = io.BytesIO()
+    sf.write(buffer, audio, sample_rate, format="WAV")
+    return buffer.getvalue()
 
 FAKE_FILES = {
     "id10018_01.wav": "Akshay_Kumar",
@@ -300,3 +312,47 @@ async def test_batch_dataset_endpoint_returns_service_result_without_leaks(clien
     call_labels = mock_analysis.call_args.args[2]
     assert call_labels == ids
     _assert_no_ground_truth_leak(response.json())
+
+
+@pytest.mark.asyncio
+async def test_batch_dataset_endpoint_accepts_mixed_demo_and_session_asset_ids(client, fake_dataset_dir):
+    demo_id = dataset.list_recordings()[0].recording_id
+    upload = await client.post(
+        "/tasks/verification/session-assets/upload",
+        files={"file": ("clip.wav", io.BytesIO(_wav_bytes()), "audio/wav")},
+    )
+    assert upload.status_code == 200
+    asset_id = upload.json()["asset_id"]
+
+    mixed_ids = [demo_id, asset_id]
+    expected = {"model": "ecapa-tdnn", "labels": mixed_ids, "recording_count": 2}
+    with patch(
+        "app.tasks.verification.router._cached_batch_analysis",
+        return_value=expected,
+    ) as mock_analysis:
+        response = await client.post(
+            "/tasks/verification/batch/dataset",
+            json={"model": "ecapa-tdnn", "recording_ids": mixed_ids},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    call_labels = mock_analysis.call_args.args[2]
+    assert call_labels == mixed_ids
+
+
+@pytest.mark.asyncio
+async def test_batch_dataset_endpoint_rejects_cross_session_asset_id(client):
+    upload = await client.post(
+        "/tasks/verification/session-assets/upload",
+        files={"file": ("clip.wav", io.BytesIO(_wav_bytes()), "audio/wav")},
+    )
+    asset_id = upload.json()["asset_id"]
+
+    async with AsyncClient(app=app, base_url="http://test", follow_redirects=True) as other_client:
+        response = await other_client.post(
+            "/tasks/verification/batch/dataset",
+            json={"model": "ecapa-tdnn", "recording_ids": [asset_id, asset_id + "x"]},
+        )
+
+    assert response.status_code == 404

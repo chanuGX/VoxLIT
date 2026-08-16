@@ -1,13 +1,9 @@
-"""Perturbation-robustness analysis for Speaker Verification.
+"""Single-clip perturbation comparison for Speaker Verification.
 
-Re-runs the task's own embedding extraction and cosine-similarity scoring
-before and after a single, user-selected perturbation is applied to the
-probe recording, so callers can see whether a model's same-speaker decision
-holds up under noise, masking, or time/pitch distortion.
-
-The enrollment centroid (the reference side) is built once, from unperturbed
-audio, and never touched. Only the probe (the target side) is perturbed --
-see `robustness_analysis`.
+Applies exactly one user-selected perturbation to exactly one selected
+recording, then compares that recording's own original and perturbed
+embeddings directly -- no enrollment centroid, no separate probe/reference
+clips. See `perturb_and_compare`.
 
 Two correctness properties this module exists to guarantee:
 
@@ -26,11 +22,9 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any, Sequence
+from typing import Any
 
 import torch
-import torch.nn.functional as F
 import torchaudio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -211,24 +205,27 @@ def _load_mono_waveform(audio_path: str | Path) -> tuple[torch.Tensor, int]:
     return waveform, sample_rate
 
 
-def robustness_analysis(
+def perturb_and_compare(
     model_key: str,
-    enrollment_paths: Sequence[str | Path],
-    probe_path: str | Path,
+    source_path: str | Path,
     perturbation_type: str,
     perturbation_params: dict[str, Any],
+    output_path: str | Path,
+    *,
+    cached_original_embedding: torch.Tensor | None = None,
 ) -> dict[str, object]:
-    """Compare a probe against its enrollment centroid before and after one
-    perturbation. Model loading and all embedding inference are deferred
-    until the perturbation is confirmed valid and actually applied, so a bad
-    request or a silent-no-op transform fails cheaply."""
-
-    if not 3 <= len(enrollment_paths) <= 5:
-        raise ValueError("Speaker enrolment requires between 3 and 5 reference recordings.")
+    """Apply one perturbation to one recording and compare its own original
+    and perturbed embeddings. Model loading and all embedding inference are
+    deferred until the perturbation is confirmed valid and actually applied,
+    and `output_path` is never written before that point either, so a bad
+    request or a silent-no-op transform fails cheaply and leaves nothing on
+    disk. The perturbed waveform is written directly to the caller-supplied
+    `output_path` (the session asset's own temp path), not a scratch
+    directory, and one loaded adapter is reused for both embeddings."""
 
     spec = service.get_model_spec(model_key)
 
-    waveform, sample_rate = _load_mono_waveform(probe_path)
+    waveform, sample_rate = _load_mono_waveform(source_path)
 
     normalized_params = validate_perturbation_params(
         perturbation_type, perturbation_params, sample_rate=sample_rate
@@ -243,34 +240,24 @@ def robustness_analysis(
         )
 
     adapter = service.get_model(model_key)
-    enrollment_embeddings = [adapter.extract_embedding(path) for path in enrollment_paths]
-    centroid = F.normalize(torch.stack(enrollment_embeddings).mean(dim=0), p=2, dim=0)
+    original_embedding = cached_original_embedding
+    if original_embedding is None:
+        original_embedding = adapter.extract_embedding(source_path)
 
-    original_probe_embedding = adapter.extract_embedding(probe_path)
-    original_similarity = service._cosine(centroid, original_probe_embedding)
+    torchaudio.save(str(output_path), perturbed_waveform, sample_rate)
+    perturbed_embedding = adapter.extract_embedding(output_path)
 
-    with TemporaryDirectory(prefix="voxlit-sv-robust-") as temp_dir:
-        perturbed_path = Path(temp_dir) / "probe-perturbed.wav"
-        torchaudio.save(str(perturbed_path), perturbed_waveform, sample_rate)
-        perturbed_probe_embedding = adapter.extract_embedding(perturbed_path)
-
-    perturbed_similarity = service._cosine(centroid, perturbed_probe_embedding)
-
-    original_same_speaker = original_similarity >= spec.threshold
-    perturbed_same_speaker = perturbed_similarity >= spec.threshold
+    similarity = service._cosine(original_embedding, perturbed_embedding)
+    same_speaker = similarity >= spec.threshold
 
     return {
         "model": spec.key,
         "model_label": spec.label,
         "threshold": spec.threshold,
-        "enrollment_count": len(enrollment_paths),
         "perturbation": {"type": perturbation_type, "params": normalized_params},
-        "perturbation_applied": True,
-        "original_similarity": original_similarity,
-        "perturbed_similarity": perturbed_similarity,
-        "similarity_delta": perturbed_similarity - original_similarity,
-        "similarity_change_abs": abs(perturbed_similarity - original_similarity),
-        "original_same_speaker": original_same_speaker,
-        "perturbed_same_speaker": perturbed_same_speaker,
-        "decision_flipped": original_same_speaker != perturbed_same_speaker,
+        "similarity": similarity,
+        "same_speaker": same_speaker,
+        "embedding_shift": 1.0 - similarity,
+        "original_embedding": original_embedding.tolist(),
+        "perturbed_embedding": perturbed_embedding.tolist(),
     }
