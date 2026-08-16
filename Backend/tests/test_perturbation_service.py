@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from app.services import pertubation_service
-from app.services.pertubation_service import apply_pitch_shift, apply_time_stretch
+from app.services.pertubation_service import add_gaussian_noise, apply_pitch_shift, apply_time_stretch
 
 
 def _make_waveform(sample_audio_data: np.ndarray, seconds: float = 1.0, sample_rate: int = 16000) -> torch.Tensor:
@@ -405,3 +405,46 @@ class TestTimeStretchTempDirectoryCleanup:
         assert observed_paths
         tmp_dir = os.path.dirname(observed_paths[0])
         assert not os.path.exists(tmp_dir)
+
+
+class TestAddGaussianNoiseScaling:
+    """
+    Regression coverage for a manual-testing report that 1% and 50% noise
+    "sound almost identical". Measurement with the real function (same seed,
+    same waveform) showed the scaling was already correct end to end
+    (noise_rms ~= noise_level, ~34 dB SNR gap between 1% and 50%) -- these
+    tests lock that behavior in so clamping/renormalization can't silently
+    regress it later.
+    """
+
+    def _noise_rms(self, waveform: torch.Tensor, noise_level: float, seed: int = 0) -> float:
+        out = add_gaussian_noise(waveform, noise_level=noise_level, seed=seed)
+        added_noise = out - waveform
+        return added_noise.pow(2).mean().sqrt().item()
+
+    def test_noise_rms_at_fifty_percent_is_far_greater_than_at_one_percent(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+
+        rms_low = self._noise_rms(waveform, noise_level=0.01)
+        rms_high = self._noise_rms(waveform, noise_level=0.5)
+
+        assert rms_high > rms_low * 10
+
+    def test_noise_outputs_at_different_levels_differ_and_are_finite(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+
+        out_low = add_gaussian_noise(waveform, noise_level=0.01, seed=0)
+        out_high = add_gaussian_noise(waveform, noise_level=0.5, seed=0)
+
+        assert torch.isfinite(out_low).all()
+        assert torch.isfinite(out_high).all()
+        assert not torch.equal(out_low, out_high)
+
+    def test_noise_rms_increases_monotonically_with_level(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        levels = [0.01, 0.05, 0.2, 0.5]
+
+        rms_values = [self._noise_rms(waveform, noise_level=level) for level in levels]
+
+        assert rms_values == sorted(rms_values)
+        assert rms_values[0] < rms_values[-1]

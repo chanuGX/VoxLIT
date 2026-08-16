@@ -159,6 +159,11 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
 
   // Verification-perturbation-mode state (unused unless `verification` is set)
   const [verificationResult, setVerificationResult] = useState<PerturbationApiResponse | null>(null)
+  // Label of the recording that was actually used as the source for
+  // `verificationResult` — captured at request time, since the app auto-selects
+  // the freshly generated clip afterward and `verification.selectedRecordingId`
+  // moves on to it.
+  const [verificationSourceLabel, setVerificationSourceLabel] = useState<string | null>(null)
   const [verificationError, setVerificationError] = useState<string | null>(null)
   const [isRunningVerificationPerturbation, setIsRunningVerificationPerturbation] = useState(false)
   const verificationAbortRef = React.useRef<AbortController | null>(null)
@@ -207,6 +212,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       verificationAbortRef.current = null;
     }
     setVerificationResult(null);
+    setVerificationSourceLabel(null);
     setVerificationError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [verification, verificationDepsKey, activeRobustnessType, activeRobustnessParamValue]);
@@ -252,6 +258,10 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
     const params = buildVerificationParams();
     if (!activeRobustnessType || !params || !verification.selectedRecordingId) return;
 
+    // Captured now, before the request resolves — `verification.selectedRecordingId`
+    // moves on to the newly generated clip as soon as `onPerturbationApplied` fires below.
+    const sourceLabel = verification.selectedRecordingLabel ?? verification.selectedRecordingId;
+
     if (verificationAbortRef.current) {
       verificationAbortRef.current.abort();
     }
@@ -261,6 +271,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
     setIsRunningVerificationPerturbation(true);
     setVerificationError(null);
     setVerificationResult(null);
+    setVerificationSourceLabel(null);
 
     try {
       const response = await fetch(`${API_BASE}/tasks/verification/perturbation`, {
@@ -281,6 +292,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
       }
       const result = payload as PerturbationApiResponse;
       setVerificationResult(result);
+      setVerificationSourceLabel(sourceLabel);
       verification.onPerturbationApplied(result);
     } catch (caught) {
       if (caught instanceof DOMException && caught.name === "AbortError") return;
@@ -662,7 +674,7 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-xs">Time Stretch</span>
                     <Badge variant="outline" className="text-xs border-blue-300 text-blue-700">
-                      {timeStretch[0]}% {timeStretch[0] < 100 ? "(Faster)" : timeStretch[0] > 100 ? "(Slower)" : "(Normal)"}
+                      {timeStretch[0]}% {timeStretch[0] < 100 ? "(Slower)" : timeStretch[0] > 100 ? "(Faster)" : "(Normal)"}
                     </Badge>
                   </div>
                   <Slider 
@@ -674,9 +686,9 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
                     className="w-full [&_[role=slider]]:border-blue-500 [&_[role=slider]]:bg-blue-600" 
                   />
                   <div className="flex justify-between text-xs text-muted-foreground">
-                    <span>50% (2x faster)</span>
+                    <span>50% (2x slower)</span>
                     <span>100%</span>
-                    <span>200% (2x slower)</span>
+                    <span>200% (2x faster)</span>
                   </div>
                 </div>
               )}
@@ -785,6 +797,12 @@ export const PerturbationTools: React.FC<PerturbationToolsProps> = ({
                 <div className="font-medium truncate">{verificationResult.session_asset.display_filename}</div>
               </div>
             </div>
+            {verificationSourceLabel && (
+              <div className="border-t pt-2">
+                <span className="text-muted-foreground">Created from</span>
+                <div className="font-medium truncate">{verificationSourceLabel}</div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
