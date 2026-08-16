@@ -16,7 +16,7 @@ import {
   DatasetRecordingRef,
   SessionAssetMetadata,
 } from '@/tasks/types';
-import { TASK_SLOTS, getModelLabel } from '@/tasks/registry';
+import { TASK_SLOTS, getModelLabel, VERIFICATION_DEMO_DATASET_ID } from '@/tasks/registry';
 
 interface TaskWorkbenchProps {
   task: TaskDefinition;
@@ -71,6 +71,8 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
             display_filename: a.display_filename,
             extension: a.extension,
             size_bytes: a.size_bytes,
+            origin: a.origin,
+            duration_seconds: a.duration_seconds,
           }))
         );
       } catch (e) {
@@ -90,6 +92,14 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
     [datasetRecordings, sessionAssets]
   );
 
+  // Real "N uploaded" count for the top-bar-driven Upload button — counts
+  // only session assets whose origin is an actual upload, never the 92
+  // built-in demo recordings or perturbation-generated assets.
+  const uploadedCount = useMemo(
+    () => sessionAssets.filter((a) => a.origin === 'upload').length,
+    [sessionAssets]
+  );
+
   // Appends a newly created session asset (top-bar upload or a perturbation
   // result) to shared state and makes it the selected/active recording, so
   // it's immediately visible in the table and playable in the Datapoint
@@ -100,6 +110,8 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
       display_filename: asset.display_filename,
       extension: asset.extension,
       size_bytes: asset.size_bytes,
+      origin: asset.origin,
+      duration_seconds: asset.duration_seconds,
     };
     setSessionAssets((prev) => [...prev, ref]);
     const fileLike: UploadedFile = {
@@ -131,6 +143,20 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   useEffect(() => {
     setPairSelectionLabels([]);
   }, [model, dataset, selectedBatchIds, uploadedFiles]);
+
+  // Auto-select every loaded demo recording for batch input, once, the first
+  // time the demo dataset's recordings arrive with nothing already checked —
+  // never re-fires afterward, so it never clobbers a user's own selection.
+  const verificationAutoSelectRef = useRef(false);
+  useEffect(() => {
+    if (task.id !== 'verification') return;
+    if (verificationAutoSelectRef.current) return;
+    if (dataset !== VERIFICATION_DEMO_DATASET_ID) return;
+    if (!datasetRecordings || datasetRecordings.length === 0) return;
+    if (selectedBatchIds.length > 0) return;
+    verificationAutoSelectRef.current = true;
+    setSelectedBatchIds(datasetRecordings.map((r) => r.recording_id));
+  }, [task.id, dataset, datasetRecordings, selectedBatchIds]);
 
   // Prediction state
   const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
@@ -728,6 +754,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                     onCheckedIdsChange={setSelectedBatchIds}
                     onVerificationRecordingsChange={setDatasetRecordings}
                     sessionAssets={sessionAssets}
+                    verificationUploadedCount={task.id === 'verification' ? uploadedCount : undefined}
                   />
                 </Panel>
               </PanelGroup>

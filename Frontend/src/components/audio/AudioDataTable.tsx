@@ -224,7 +224,31 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
   const verificationColumns: ColumnDef<unknown, unknown>[] = useMemo(() => [
     {
       id: "select",
-      header: "",
+      header: ({ table }) => {
+        // table.getCoreRowModel() covers every loaded row regardless of
+        // pagination/search filter — getRowId (below) already guarantees
+        // row.id is the real opaque recording_id/asset_id, never a
+        // pagination index, so this never leaks an index into checkedIds.
+        const allIds = table.getCoreRowModel().rows.map((r) => r.id);
+        const selectedCount = allIds.filter((id) => checkedIds?.includes(id)).length;
+        const allSelected = allIds.length > 0 && selectedCount === allIds.length;
+        const someSelected = selectedCount > 0 && !allSelected;
+        return (
+          <div onClick={(e) => e.stopPropagation()}>
+            <Checkbox
+              checked={allSelected ? true : someSelected ? "indeterminate" : false}
+              onCheckedChange={(value) => {
+                if (!onCheckedIdsChange) return;
+                if (value) {
+                  onCheckedIdsChange(Array.from(new Set([...(checkedIds ?? []), ...allIds])));
+                } else {
+                  onCheckedIdsChange((checkedIds ?? []).filter((id) => !allIds.includes(id)));
+                }
+              }}
+            />
+          </div>
+        );
+      },
       cell: ({ row }) => {
         const rowId = row.id as string;
         const checked = checkedIds?.includes(rowId) ?? false;
@@ -277,6 +301,21 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           : Number(getFrom(row.original as DatasetRow, ["size_bytes", "size"], "0")) || undefined;
         if (!sizeBytes) return <span className="text-xs text-muted-foreground">—</span>;
         return <span className="text-xs text-muted-foreground">{(sizeBytes / 1024).toFixed(1)} KB</span>;
+      },
+    },
+    {
+      id: "duration",
+      header: "Duration",
+      cell: ({ row }) => {
+        const raw = (row.original as DatasetRow)["duration_seconds"];
+        const seconds = typeof raw === "number" ? raw : null;
+        if (seconds === null) return <span className="text-xs text-muted-foreground">—</span>;
+        const total = Math.round(seconds);
+        return (
+          <span className="text-xs text-muted-foreground">
+            {Math.floor(total / 60)}:{String(total % 60).padStart(2, "0")}
+          </span>
+        );
       },
     },
   ], [checkedIds, onCheckedIdsChange, getFrom]);

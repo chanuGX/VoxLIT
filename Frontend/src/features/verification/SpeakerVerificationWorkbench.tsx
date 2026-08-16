@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, FileAudio, ShieldCheck, Users, XCircle } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileAudio, Users, XCircle } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -259,26 +259,17 @@ export const SpeakerVerificationWorkbench = ({
   };
 
   return (
-    <div className="h-full overflow-y-auto bg-background p-4 scrollbar-thin">
-      <div className="mx-auto max-w-4xl space-y-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary" />
-            <h2 className="text-lg font-semibold">Explainable Speaker Verification</h2>
-            <Badge variant="outline">{modelLabel}</Badge>
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Build a temporary speaker profile from 3–5 recordings, then compare one probe recording with its embedding centroid.
-          </p>
-        </div>
+    <Tabs defaultValue="pair-verification" className="h-full flex flex-col">
+      <div className="flex-shrink-0 bg-panel-header border-b border-border px-3 py-2">
+        <TabsList className="h-7 grid w-full grid-cols-3 bg-muted">
+          <TabsTrigger value="pair-verification" className="text-xs">Pair Verification</TabsTrigger>
+          <TabsTrigger value="batch-analysis" className="text-xs">Batch Analysis</TabsTrigger>
+          <TabsTrigger value="perturbation" className="text-xs">Perturbation</TabsTrigger>
+        </TabsList>
+      </div>
 
-        <Tabs defaultValue="pair-verification" className="w-full">
-          <TabsList>
-            <TabsTrigger value="pair-verification">Pair Verification</TabsTrigger>
-            <TabsTrigger value="batch-analysis">Batch Analysis</TabsTrigger>
-            <TabsTrigger value="perturbation">Perturbation</TabsTrigger>
-          </TabsList>
-
+      <div className="flex-1 overflow-y-auto bg-background p-4 scrollbar-thin">
+        <div className="mx-auto max-w-4xl space-y-4">
           <TabsContent value="pair-verification" className="space-y-4">
         <div className="grid gap-4 md:grid-cols-2">
           <Card>
@@ -501,8 +492,8 @@ export const SpeakerVerificationWorkbench = ({
           <TabsContent value="perturbation" forceMount className="space-y-4 data-[state=inactive]:hidden">
             <PerturbationTools selectedFile={null} verification={verificationPerturbationContext} />
           </TabsContent>
-        </Tabs>
+        </div>
       </div>
-    </div>
+    </Tabs>
   );
 };

@@ -125,6 +125,11 @@ export interface DatasetRecordingRef {
   display_filename: string;
   extension: string;
   size_bytes: number;
+  /** Present for session assets (uploads/perturbation outputs); absent for demo rows. */
+  origin?: "upload" | "perturbation";
+  /** Present for demo rows once duration metadata has been read, or for
+   *  session assets (always available there). Null when unavailable. */
+  duration_seconds?: number | null;
 }
 
 /** A session-scoped verification asset (upload or perturbation output), as

@@ -89,7 +89,7 @@ export const TASKS: TaskDefinition[] = [
     ],
     defaultModel: "ecapa-tdnn",
     datasets: [{ id: "voxceleb1-indian-demo", label: "VoxCeleb1 Indian (Demo)", available: true }],
-    defaultDataset: null,
+    defaultDataset: "voxceleb1-indian-demo",
     allowCustomDatasets: false,
     capabilities: {
       saliency: false,

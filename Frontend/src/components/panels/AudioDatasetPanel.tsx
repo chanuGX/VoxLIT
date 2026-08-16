@@ -51,6 +51,10 @@ interface AudioDatasetPanelProps {
   /** Verification-only: session-scoped assets (uploads + perturbation
    *  outputs) to render as extra rows alongside the demo dataset. */
   sessionAssets?: DatasetRecordingRef[];
+  /** Verification-only: real count of session assets with origin==="upload",
+   *  computed by TaskWorkbench. Replaces this panel's own (always-empty,
+   *  for verification) local uploadedFiles-based badge count. */
+  verificationUploadedCount?: number;
 }
 
 export const AudioDatasetPanel = ({ 
@@ -73,6 +77,7 @@ export const AudioDatasetPanel = ({
   onCheckedIdsChange,
   onVerificationRecordingsChange,
   sessionAssets,
+  verificationUploadedCount,
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -92,6 +97,7 @@ export const AudioDatasetPanel = ({
       filename: a.display_filename,
       extension: a.extension,
       size_bytes: a.size_bytes,
+      duration_seconds: a.duration_seconds,
     }));
     return [...datasetMetadata, ...assetRows];
   }, [selectionVariant, datasetMetadata, sessionAssets]);
@@ -423,7 +429,7 @@ export const AudioDatasetPanel = ({
         const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { credentials: 'include' });
         if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
         const data = await res.json() as { recordings: DatasetRecordingRef[] };
-        const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes }));
+        const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds }));
         setDatasetMetadata(rows);
         onAvailableFilesChange?.(rows.map(r => r.filename));
         onVerificationRecordingsChange?.(data.recordings);
@@ -498,7 +504,7 @@ export const AudioDatasetPanel = ({
           const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { signal: ac.signal, credentials: 'include' });
           if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
           const data = await res.json() as { recordings: DatasetRecordingRef[] };
-          const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes }));
+          const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds }));
           setDatasetMetadata(rows);
           onAvailableFilesChange?.(rows.map(r => r.filename));
           onVerificationRecordingsChange?.(data.recordings);
@@ -635,7 +641,9 @@ export const AudioDatasetPanel = ({
             </div>
             <div className="flex items-center gap-1.5">
               <Badge variant="outline" className="text-[10px] bg-muted">
-                {uploadedFiles ? `${uploadedFiles.length} uploaded` : "0 files"}
+                {selectionVariant === 'verification'
+                  ? `${verificationUploadedCount ?? 0} uploaded`
+                  : uploadedFiles ? `${uploadedFiles.length} uploaded` : "0 files"}
               </Badge>
               {batchInferenceStatus === 'running' && batchInferenceQueue.length > 0 && (
                 <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">

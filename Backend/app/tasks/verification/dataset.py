@@ -14,6 +14,8 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+import torchaudio
+
 from app.core.settings import settings
 
 DATASET_ID = "voxceleb1-indian-demo"
@@ -35,6 +37,7 @@ class RecordingInfo:
     display_filename: str
     extension: str
     size_bytes: int
+    duration_seconds: float | None
 
 
 def _dataset_dir() -> Path:
@@ -44,6 +47,20 @@ def _dataset_dir() -> Path:
 def _recording_id_for(filename: str) -> str:
     digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
     return f"rec_{digest[:16]}"
+
+
+def _duration_seconds(path: Path) -> float | None:
+    """Header-only duration inspection (no full waveform decode). Returns
+    `None` for any unreadable/corrupt/non-audio file rather than raising, so
+    a single bad file never breaks the whole listing."""
+
+    try:
+        info = torchaudio.info(str(path))
+        if info.sample_rate <= 0:
+            return None
+        return info.num_frames / info.sample_rate
+    except Exception:
+        return None
 
 
 def _iter_audio_files(dataset_dir: Path):
@@ -69,6 +86,7 @@ def _discover(dataset_dir: Path) -> list[RecordingInfo]:
                 display_filename=f"{recording_id}{extension}",
                 extension=extension,
                 size_bytes=entry.stat().st_size,
+                duration_seconds=_duration_seconds(entry),
             )
         )
 

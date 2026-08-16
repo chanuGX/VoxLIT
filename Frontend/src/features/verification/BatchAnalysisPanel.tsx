@@ -57,6 +57,12 @@ export const BatchAnalysisPanel = ({
 
   const batchAbortRef = useRef<AbortController | null>(null);
   const projectionAbortRef = useRef<AbortController | null>(null);
+  // Auto-run: fires runBatch() once per (model, dataset) pair, the first
+  // time canRun becomes true for that pair. Covers "run once on initial
+  // load" and "rerun when the user changes model," without refiring on
+  // selectedBatchIds changes alone (so manual checkbox edits or row/point
+  // clicks never auto-rerun it).
+  const autoRunFiredForRef = useRef<string | null>(null);
 
   const inputMode: "dataset" | "upload" | "none" =
     dataset === "custom" ? "upload" : dataset === VERIFICATION_DEMO_DATASET_ID ? "dataset" : "none";
@@ -148,6 +154,15 @@ export const BatchAnalysisPanel = ({
       }
     }
   };
+
+  useEffect(() => {
+    if (inputMode !== "dataset" || !canRun) return;
+    const key = `${model}|${dataset}`;
+    if (autoRunFiredForRef.current === key) return;
+    autoRunFiredForRef.current = key;
+    runBatch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, dataset, canRun, inputMode]);
 
   // Re-project the already-computed embeddings and publish cluster-colored
   // points into the shared EmbeddingContext (never re-runs inference).
@@ -278,7 +293,7 @@ export const BatchAnalysisPanel = ({
         <div className="flex h-24 items-center justify-center text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
             <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-            Extracting embeddings for {modelLabel}…
+            Analysing {submittedIds.length || selectedBatchIds.length} recordings with {modelLabel}…
           </div>
         </div>
       )}

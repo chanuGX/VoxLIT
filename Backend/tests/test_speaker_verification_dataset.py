@@ -9,7 +9,9 @@ never the real, gitignored dataset — mirroring the pattern used in
 import json
 from dataclasses import asdict
 
+import numpy as np
 import pytest
+import soundfile as sf
 
 from app.core.settings import settings
 from app.tasks.verification import dataset
@@ -70,6 +72,32 @@ def test_list_recordings_excludes_non_audio_files(fake_dataset_dir):
     recordings = dataset.list_recordings()
     assert len(recordings) == len(FAKE_FILES)
     assert all(r.extension == ".wav" for r in recordings)
+
+
+def test_duration_seconds_is_none_for_unreadable_audio(fake_dataset_dir):
+    # FAKE_FILES are non-audio bytes, so torchaudio.info() cannot read them —
+    # this exercises the except-Exception -> None fallback, not the happy path.
+    recordings = dataset.list_recordings()
+    assert len(recordings) > 0
+    for recording in recordings:
+        assert recording.duration_seconds is None
+        assert "duration_seconds" in asdict(recording)
+
+
+def test_duration_seconds_is_positive_for_real_audio(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+    dataset_dir = tmp_path / "vox_indian_demo_92"
+    dataset_dir.mkdir(parents=True)
+
+    sample_rate = 16000
+    seconds = 0.5
+    t = np.linspace(0, seconds, int(sample_rate * seconds), False)
+    audio = (0.3 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+    sf.write(dataset_dir / "id10018_01.wav", audio, sample_rate)
+
+    recordings = dataset.list_recordings()
+    assert len(recordings) == 1
+    assert recordings[0].duration_seconds == pytest.approx(seconds, abs=0.05)
 
 
 def test_recording_ids_are_stable_and_opaque(fake_dataset_dir):

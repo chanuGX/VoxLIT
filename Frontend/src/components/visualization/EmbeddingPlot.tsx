@@ -24,6 +24,9 @@ interface EmbeddingPlotProps {
   onSelectionChange?: (selectedFiles: string[]) => void;
   externalData?: ExternalEmbeddingPoint[];
   externalSelectedLabels?: string[];
+  /** Speaker Verification only: before a real batch result exists, render an
+   *  empty-state message instead of the shared mock-data fallback. */
+  verificationMode?: boolean;
 }
 
 type PlaneType = 'none' | 'xy' | 'xz' | 'yz';
@@ -39,9 +42,10 @@ interface EmbeddingPlotContentProps {
   onSelectionChange?: (selectedFiles: string[]) => void;
   externalData?: ExternalEmbeddingPoint[];
   externalSelectedLabels?: string[];
+  verificationMode?: boolean;
 }
 
-const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels }: EmbeddingPlotContentProps) => {
+const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels, verificationMode }: EmbeddingPlotContentProps) => {
   const { embeddingData, isLoading, error } = useEmbedding();
   const isExternal = externalData !== undefined;
   const plotRef = useRef<any>(null);
@@ -57,6 +61,35 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       setSelectedByAngle([]);
     }
   }, [is3D]);
+
+  // Confirmed via instrumented tracing (temporary console logging of every
+  // handlePointClick/onPointSelect/downstream-selection-callback invocation,
+  // plus raw DOM pointerdown/mousedown/pointerup/mouseup/click listeners on
+  // the plot's canvas): for one physical 3D click, the DOM only ever
+  // dispatches a single pointerdown/mousedown/pointerup/mouseup/click
+  // sequence, but plotly.js's own gl3d picking module calls our onClick prop
+  // (plotly_click) more than once for that one gesture -- both calls report
+  // the identical curveNumber/pointIndex/customdata, and both land between
+  // the DOM's mousedown and mouseup (i.e. while the button is still held),
+  // not after it -- consistent with gl3d re-emitting a "click" hit on more
+  // than one animation frame during the press before the button is
+  // released. This is not a duplicate handler registration (traces/layout
+  // are already memoized below and had no effect on the duplicate count),
+  // not an overlapping-trace issue (only one canvas, one curveNumber), and
+  // not fixable by debouncing distinct clicks over time. The correct fix is
+  // to gate on the actual press/release gesture: only the first
+  // plotly_click within a given pointerdown-to-pointerup window is acted
+  // on, and the gate re-arms on release so the next real click still works.
+  const clickGestureHandledRef = useRef(false);
+  useEffect(() => {
+    const rearm = () => { clickGestureHandledRef.current = false; };
+    window.addEventListener('pointerup', rearm);
+    window.addEventListener('mouseup', rearm);
+    return () => {
+      window.removeEventListener('pointerup', rearm);
+      window.removeEventListener('mouseup', rearm);
+    };
+  }, []);
 
   // Generate mock data as fallback
   const generateMockData = () => {
@@ -78,6 +111,11 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
 
   // Handle point selection
   const handlePointClick = useCallback((event: any) => {
+    // Only the first plotly_click within a given pointerdown-to-pointerup
+    // gesture is acted on -- see the clickGestureHandledRef comment above.
+    if (clickGestureHandledRef.current) {
+      return;
+    }
     if (event.points && event.points.length > 0) {
       const point = event.points[0];
       // Use customdata[0] which contains the raw filename/label (not the HTML-formatted text).
@@ -86,6 +124,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       if (label === undefined) {
         return;
       }
+      clickGestureHandledRef.current = true;
       const coordinates = is3D ? [point.x, point.y, point.z] : [point.x, point.y];
 
       if (onPointSelect) {
@@ -313,16 +352,308 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     }
   }, [selectedFiles, onAngleRangeSelect]); // Remove selectedByAngle from dependencies to prevent loops
 
-  const plotData = getPlotData();
-  const { x, y, colors, text } = plotData;
-  const z = 'z' in plotData ? plotData.z : undefined;
+  // Traces are memoized so an unrelated re-render (e.g. a click's own state
+  // update) doesn't rebuild data/traces with a new identity every time.
+  // react-plotly.js calls Plotly.react() whenever the data/layout prop
+  // reference changes, and repeated Plotly.react() calls on the gl3d scene
+  // were the confirmed cause of a single physical 3D click invoking
+  // handlePointClick twice (traced via temporary instrumentation: two
+  // identical curveNumber/customdata firings per click, eliminated once
+  // traces/layout stopped changing identity on every render).
+  const traces = useMemo(() => {
+    const plotData = getPlotData();
+    const { x, y, colors, text } = plotData;
+    const z = 'z' in plotData ? plotData.z : undefined;
 
-  // Calculate bounds for plane creation
-  const bounds = x.length > 0 ? {
-    x: [Math.min(...x) * 1.1, Math.max(...x) * 1.1] as [number, number],
-    y: [Math.min(...y) * 1.1, Math.max(...y) * 1.1] as [number, number],
-    z: z && z.length > 0 ? [Math.min(...z) * 1.1, Math.max(...z) * 1.1] as [number, number] : [0, 0] as [number, number]
-  } : { x: [0, 0] as [number, number], y: [0, 0] as [number, number], z: [0, 0] as [number, number] };
+    // Calculate bounds for plane creation
+    const bounds = x.length > 0 ? {
+      x: [Math.min(...x) * 1.1, Math.max(...x) * 1.1] as [number, number],
+      y: [Math.min(...y) * 1.1, Math.max(...y) * 1.1] as [number, number],
+      z: z && z.length > 0 ? [Math.min(...z) * 1.1, Math.max(...z) * 1.1] as [number, number] : [0, 0] as [number, number]
+    } : { x: [0, 0] as [number, number], y: [0, 0] as [number, number], z: [0, 0] as [number, number] };
+
+    // Create marker sizes based on selection
+    const markerSizes = text.map(filename => {
+      if (isExternal) {
+        return externalSelectedLabels?.includes(filename) ? 12 : 8;
+      }
+      if (selectedFile === filename) return 12; // Currently selected file (medium-large)
+      if (selectedByAngle.includes(filename)) return 8; // Angle range selected (medium)
+      return 6; // Default (smaller)
+    });
+
+    // Create marker colors based on selection
+    const markerColors = text.map((filename, index) => {
+      if (isExternal) {
+        // Selection gold always wins over the backend-provided cluster color,
+        // matching the existing priority rule below.
+        return externalSelectedLabels?.includes(filename) ? '#FFD700' : externalData![index].color;
+      }
+      if (selectedFile === filename) return '#FFD700'; // Gold for selected file
+      if (selectedByAngle.includes(filename)) return '#ef4444'; // Red for angle selected
+      return '#3b82f6'; // Blue for all other points
+    });
+
+    // Create marker opacities based on selection
+    const hasSelection = isExternal
+      ? (externalSelectedLabels?.length ?? 0) > 0
+      : selectedFile || selectedByAngle.length > 0;
+    const markerOpacities = text.map(filename => {
+      if (isExternal) {
+        return externalSelectedLabels?.includes(filename) ? 1.0 : 0.85;
+      }
+      if (!hasSelection) return 0.8; // Default opacity when no selection
+      if (selectedFile === filename) return 1.0; // Full opacity for selected file
+      if (selectedByAngle.includes(filename)) return 0.9; // High opacity for angle selected
+      // Different transparency for 2D vs 3D unselected points
+      return is3D ? 0.1 : 0.45; // More transparent in 3D, slightly visible in 2D
+    });
+
+    // Create traces array - start with main scatter plot
+    const result: any[] = [];
+
+    // Create hover text with angle information
+    const hoverText = text.map((filename, index) => {
+      let baseText = `<b>${filename}</b>`;
+
+      if (isExternal && externalData![index].hoverExtra) {
+        baseText += `<br>${externalData![index].hoverExtra}`;
+      }
+
+      // Add angle information if this point is selected by angle range and in 3D mode
+      if (is3D && selectedPlane !== 'none' && selectedByAngle.includes(filename) && z) {
+        const [px, py, pz] = [x[index], y[index], z[index]];
+        const angle = calculateAngleToPlane(px, py, pz, selectedPlane);
+        baseText += `<br>Angle: ${angle.toFixed(1)}°`;
+        baseText += `<br>Plane: ${selectedPlane.toUpperCase()}`;
+      }
+
+      return baseText;
+    });
+
+    // Create main trace data
+    const traceData: any = {
+      x: x,
+      y: y,
+      mode: 'markers',
+      type: is3D ? 'scatter3d' : 'scatter',
+      marker: {
+        size: markerSizes,
+        color: markerColors,
+        showscale: false,
+        line: {
+          width: 0, // Remove marker outlines
+          color: 'transparent'
+        },
+        opacity: markerOpacities // Use dynamic opacity array
+      },
+      text: hoverText,
+      // Store [filename/label, color] for each point
+      customdata: text.map((filename, index) => [filename, isExternal ? externalData![index].color : colors[index]]),
+    };
+
+    // Add Z coordinate for 3D plots
+    if (is3D && z) {
+      traceData.z = z;
+      traceData.hovertemplate = '%{text}<extra></extra>';
+    } else {
+      traceData.hovertemplate = '%{text}<extra></extra>';
+    }
+
+    result.push(traceData);
+
+    // Add origin point (0,0,0) highlight for 3D plots or (0,0) for 2D plots
+    const originTrace: any = {
+      x: [0],
+      y: [0],
+      mode: 'markers',
+      type: is3D ? 'scatter3d' : 'scatter',
+      marker: {
+        size: is3D ? 5 : 4, // Slightly smaller to match the new scale
+        color: '#000000', // Black for origin
+        symbol: 'diamond',
+        line: {
+          width: 1, // Thinner outline
+          color: '#ffffff' // White outline for visibility
+        },
+        opacity: 0.8 // Slightly transparent
+      },
+      text: [is3D ? 'Origin (0,0,0)' : 'Origin (0,0)'],
+      hovertemplate: is3D ? '<b>Origin (0,0,0)</b><extra></extra>' : '<b>Origin (0,0)</b><extra></extra>',
+      name: 'Origin',
+      showlegend: false
+    };
+
+    if (is3D) {
+      originTrace.z = [0];
+    }
+
+    result.push(originTrace);
+
+    // Connect the two externally-selected points (pair comparison). No customdata is set,
+    // so this trace is excluded from click/box-select and from the plane/angle point source.
+    if (isExternal && externalData && externalSelectedLabels?.length === 2) {
+      const [labelA, labelB] = externalSelectedLabels;
+      const pointA = externalData.find(point => point.label === labelA);
+      const pointB = externalData.find(point => point.label === labelB);
+      if (pointA && pointB) {
+        const connectorTrace: any = {
+          x: [pointA.coordinates[0], pointB.coordinates[0]],
+          y: [pointA.coordinates[1], pointB.coordinates[1]],
+          mode: 'lines',
+          type: is3D ? 'scatter3d' : 'scatter',
+          line: { color: '#6b7280', width: 2, dash: 'dot' },
+          hoverinfo: 'skip',
+          showlegend: false,
+          name: 'Pair connector',
+        };
+        if (is3D) {
+          connectorTrace.z = [pointA.coordinates[2], pointB.coordinates[2]];
+        }
+        result.push(connectorTrace);
+      }
+    }
+
+    // Add plane if selected and in 3D mode
+    if (is3D && selectedPlane !== 'none') {
+      const planeTrace = createPlane(selectedPlane, bounds);
+      if (planeTrace) {
+        result.push(planeTrace);
+      }
+    }
+
+    return result;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExternal, externalData, externalSelectedLabels, embeddingData, is3D, selectedFile, selectedByAngle, selectedPlane, angleMin, angleMax]);
+
+  const layout = useMemo(() => {
+    // Layout configuration
+    const result: any = {
+      autosize: true,
+      margin: { l: 35, r: 35, t: 35, b: 35 },
+      plot_bgcolor: 'white',
+      paper_bgcolor: 'white',
+      showlegend: false,
+      font: {
+        size: 11,
+        color: '#374151'
+      },
+      dragmode: is3D ? 'orbit' : (selectionMode === 'box' ? 'select' : 'lasso'),
+      hovermode: 'closest',
+      uirevision: true // Maintains UI state on data updates
+    };
+
+    if (is3D) {
+      // Axis titles reflect the active reduction method, e.g. "PCA 1"/"UMAP 2"/"t-SNE 3".
+      const methodLabel = selectedMethod === 'umap' ? 'UMAP' : selectedMethod === 'tsne' ? 't-SNE' : 'PCA';
+      const axisTitle = (n: 1 | 2 | 3) => `${methodLabel} ${n}`;
+
+      // 3D scene configuration
+      result.scene = {
+        xaxis: {
+          showgrid: true,
+          gridcolor: '#e5e7eb',
+          showticklabels: true,
+          tickfont: { size: 9, color: '#6b7280' },
+          title: { text: axisTitle(1), font: { size: 10 } },
+          backgroundcolor: 'white',
+          showspikes: false,
+          zeroline: true,
+          zerolinecolor: '#d1d5db',
+          showline: true,
+          linecolor: '#9ca3af'
+        },
+        yaxis: {
+          showgrid: true,
+          gridcolor: '#e5e7eb',
+          showticklabels: true,
+          tickfont: { size: 9, color: '#6b7280' },
+          title: { text: axisTitle(2), font: { size: 10 } },
+          backgroundcolor: 'white',
+          showspikes: false,
+          zeroline: true,
+          zerolinecolor: '#d1d5db',
+          showline: true,
+          linecolor: '#9ca3af'
+        },
+        zaxis: {
+          showgrid: true,
+          gridcolor: '#e5e7eb',
+          showticklabels: true,
+          tickfont: { size: 9, color: '#6b7280' },
+          title: { text: axisTitle(3), font: { size: 10 } },
+          backgroundcolor: 'white',
+          showspikes: false,
+          zeroline: true,
+          zerolinecolor: '#d1d5db',
+          showline: true,
+          linecolor: '#9ca3af'
+        },
+        bgcolor: 'white',
+        camera: {
+          eye: { x: 1.5, y: 1.5, z: 1.5 },
+          center: { x: 0, y: 0, z: 0 },
+          up: { x: 0, y: 0, z: 1 }
+        },
+        aspectmode: 'cube',
+        dragmode: 'orbit'
+      };
+    } else {
+      // 2D axis configuration with enhanced zoom support
+      result.xaxis = {
+        showgrid: true,
+        gridcolor: '#e5e7eb',
+        showticklabels: false,
+        title: { text: 'X', font: { size: 10 } },
+        zeroline: true,
+        zerolinecolor: '#d1d5db',
+        zerolinewidth: 1,
+        fixedrange: false // Allow zoom
+      };
+      result.yaxis = {
+        showgrid: true,
+        gridcolor: '#e5e7eb',
+        showticklabels: false,
+        title: { text: 'Y', font: { size: 10 } },
+        zeroline: true,
+        zerolinecolor: '#d1d5db',
+        zerolinewidth: 1,
+        fixedrange: false // Allow zoom
+      };
+    }
+
+    // Add compact annotation
+    if (embeddingData || isExternal) {
+      const fileCount = isExternal ? (externalData?.length ?? 0) : embeddingData!.total_files;
+      result.annotations = [{
+        text: `${fileCount} files • ${is3D ? '3D' : '2D'}`,
+        xref: 'paper',
+        yref: 'paper',
+        x: 0.02,
+        y: 0.98,
+        xanchor: 'left',
+        yanchor: 'top',
+        font: { size: 9, color: '#6b7280' },
+        showarrow: false,
+        bgcolor: 'rgba(255,255,255,0.8)',
+        bordercolor: '#e5e7eb',
+        borderwidth: 1,
+        borderpad: 2
+      }];
+    }
+
+    return result;
+  }, [is3D, selectedPlane, selectionMode, selectedMethod, embeddingData, isExternal, externalData]);
+
+  if (verificationMode && !isExternal) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-xs text-muted-foreground text-center px-4">
+          No batch analysis results to display yet.
+        </div>
+      </div>
+    );
+  }
 
   if (!isExternal && isLoading) {
     return (
@@ -344,258 +675,6 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
         </div>
       </div>
     );
-  }
-
-  // Create marker sizes based on selection
-  const markerSizes = text.map(filename => {
-    if (isExternal) {
-      return externalSelectedLabels?.includes(filename) ? 12 : 8;
-    }
-    if (selectedFile === filename) return 12; // Currently selected file (medium-large)
-    if (selectedByAngle.includes(filename)) return 8; // Angle range selected (medium)
-    return 6; // Default (smaller)
-  });
-
-  // Create marker colors based on selection
-  const markerColors = text.map((filename, index) => {
-    if (isExternal) {
-      // Selection gold always wins over the backend-provided cluster color,
-      // matching the existing priority rule below.
-      return externalSelectedLabels?.includes(filename) ? '#FFD700' : externalData![index].color;
-    }
-    if (selectedFile === filename) return '#FFD700'; // Gold for selected file
-    if (selectedByAngle.includes(filename)) return '#ef4444'; // Red for angle selected
-    return '#3b82f6'; // Blue for all other points
-  });
-
-  // Create marker opacities based on selection
-  const hasSelection = isExternal
-    ? (externalSelectedLabels?.length ?? 0) > 0
-    : selectedFile || selectedByAngle.length > 0;
-  const markerOpacities = text.map(filename => {
-    if (isExternal) {
-      return externalSelectedLabels?.includes(filename) ? 1.0 : 0.85;
-    }
-    if (!hasSelection) return 0.8; // Default opacity when no selection
-    if (selectedFile === filename) return 1.0; // Full opacity for selected file
-    if (selectedByAngle.includes(filename)) return 0.9; // High opacity for angle selected
-    // Different transparency for 2D vs 3D unselected points
-    return is3D ? 0.1 : 0.45; // More transparent in 3D, slightly visible in 2D
-  });
-
-  // Create traces array - start with main scatter plot
-  const traces: any[] = [];
-
-  // Create hover text with angle information
-  const hoverText = text.map((filename, index) => {
-    let baseText = `<b>${filename}</b>`;
-
-    if (isExternal && externalData![index].hoverExtra) {
-      baseText += `<br>${externalData![index].hoverExtra}`;
-    }
-
-    // Add angle information if this point is selected by angle range and in 3D mode
-    if (is3D && selectedPlane !== 'none' && selectedByAngle.includes(filename) && z) {
-      const [px, py, pz] = [x[index], y[index], z[index]];
-      const angle = calculateAngleToPlane(px, py, pz, selectedPlane);
-      baseText += `<br>Angle: ${angle.toFixed(1)}°`;
-      baseText += `<br>Plane: ${selectedPlane.toUpperCase()}`;
-    }
-
-    return baseText;
-  });
-
-  // Create main trace data
-  const traceData: any = {
-    x: x,
-    y: y,
-    mode: 'markers',
-    type: is3D ? 'scatter3d' : 'scatter',
-    marker: {
-      size: markerSizes,
-      color: markerColors,
-      showscale: false,
-      line: {
-        width: 0, // Remove marker outlines
-        color: 'transparent'
-      },
-      opacity: markerOpacities // Use dynamic opacity array
-    },
-    text: hoverText,
-    // Store [filename/label, color] for each point
-    customdata: text.map((filename, index) => [filename, isExternal ? externalData![index].color : colors[index]]),
-  };
-
-  // Add Z coordinate for 3D plots
-  if (is3D && z) {
-    traceData.z = z;
-    traceData.hovertemplate = '%{text}<extra></extra>';
-  } else {
-    traceData.hovertemplate = '%{text}<extra></extra>';
-  }
-
-  traces.push(traceData);
-
-  // Add origin point (0,0,0) highlight for 3D plots or (0,0) for 2D plots
-  const originTrace: any = {
-    x: [0],
-    y: [0],
-    mode: 'markers',
-    type: is3D ? 'scatter3d' : 'scatter',
-    marker: {
-      size: is3D ? 5 : 4, // Slightly smaller to match the new scale
-      color: '#000000', // Black for origin
-      symbol: 'diamond',
-      line: {
-        width: 1, // Thinner outline
-        color: '#ffffff' // White outline for visibility
-      },
-      opacity: 0.8 // Slightly transparent
-    },
-    text: [is3D ? 'Origin (0,0,0)' : 'Origin (0,0)'],
-    hovertemplate: is3D ? '<b>Origin (0,0,0)</b><extra></extra>' : '<b>Origin (0,0)</b><extra></extra>',
-    name: 'Origin',
-    showlegend: false
-  };
-
-  if (is3D) {
-    originTrace.z = [0];
-  }
-
-  traces.push(originTrace);
-
-  // Connect the two externally-selected points (pair comparison). No customdata is set,
-  // so this trace is excluded from click/box-select and from the plane/angle point source.
-  if (isExternal && externalData && externalSelectedLabels?.length === 2) {
-    const [labelA, labelB] = externalSelectedLabels;
-    const pointA = externalData.find(point => point.label === labelA);
-    const pointB = externalData.find(point => point.label === labelB);
-    if (pointA && pointB) {
-      const connectorTrace: any = {
-        x: [pointA.coordinates[0], pointB.coordinates[0]],
-        y: [pointA.coordinates[1], pointB.coordinates[1]],
-        mode: 'lines',
-        type: is3D ? 'scatter3d' : 'scatter',
-        line: { color: '#6b7280', width: 2, dash: 'dot' },
-        hoverinfo: 'skip',
-        showlegend: false,
-        name: 'Pair connector',
-      };
-      if (is3D) {
-        connectorTrace.z = [pointA.coordinates[2], pointB.coordinates[2]];
-      }
-      traces.push(connectorTrace);
-    }
-  }
-
-  // Add plane if selected and in 3D mode
-  if (is3D && selectedPlane !== 'none') {
-    const planeTrace = createPlane(selectedPlane, bounds);
-    if (planeTrace) {
-      traces.push(planeTrace);
-    }
-  }
-
-  // Layout configuration
-  const layout: any = {
-    autosize: true,
-    margin: { l: 35, r: 35, t: 35, b: 35 },
-    plot_bgcolor: 'white',
-    paper_bgcolor: 'white',
-    showlegend: false,
-    font: {
-      size: 11,
-      color: '#374151'
-    },
-    dragmode: is3D ? 'orbit' : (selectionMode === 'box' ? 'select' : 'lasso'),
-    hovermode: 'closest',
-    uirevision: true // Maintains UI state on data updates
-  };
-
-  if (is3D) {
-    // 3D scene configuration
-    layout.scene = {
-      xaxis: {
-        showgrid: false, // Remove grid lines
-        gridcolor: '#e5e7eb',
-        showticklabels: false,
-        title: { text: 'X', font: { size: 10 } },
-        backgroundcolor: 'white',
-        showspikes: false,
-        zeroline: false, // Remove zero line
-        showline: false  // Remove axis line
-      },
-      yaxis: {
-        showgrid: false, // Remove grid lines
-        gridcolor: '#e5e7eb',
-        showticklabels: false,
-        title: { text: 'Y', font: { size: 10 } },
-        backgroundcolor: 'white',
-        showspikes: false,
-        zeroline: false, // Remove zero line
-        showline: false  // Remove axis line
-      },
-      zaxis: {
-        showgrid: false, // Remove grid lines
-        gridcolor: '#e5e7eb',
-        showticklabels: false,
-        title: { text: 'Z', font: { size: 10 } },
-        backgroundcolor: 'white',
-        showspikes: false,
-        zeroline: false, // Remove zero line
-        showline: false  // Remove axis line
-      },
-      bgcolor: 'white',
-      camera: {
-        eye: { x: 1.5, y: 1.5, z: 1.5 },
-        center: { x: 0, y: 0, z: 0 },
-        up: { x: 0, y: 0, z: 1 }
-      },
-      aspectmode: 'cube',
-      dragmode: 'orbit'
-    };
-  } else {
-    // 2D axis configuration with enhanced zoom support
-    layout.xaxis = {
-      showgrid: true,
-      gridcolor: '#e5e7eb',
-      showticklabels: false,
-      title: { text: 'X', font: { size: 10 } },
-      zeroline: true,
-      zerolinecolor: '#d1d5db',
-      zerolinewidth: 1,
-      fixedrange: false // Allow zoom
-    };
-    layout.yaxis = {
-      showgrid: true,
-      gridcolor: '#e5e7eb',
-      showticklabels: false,
-      title: { text: 'Y', font: { size: 10 } },
-      zeroline: true,
-      zerolinecolor: '#d1d5db',
-      zerolinewidth: 1,
-      fixedrange: false // Allow zoom
-    };
-  }
-
-  // Add compact annotation
-  if (embeddingData || isExternal) {
-    const fileCount = isExternal ? (externalData?.length ?? 0) : embeddingData!.total_files;
-    layout.annotations = [{
-      text: `${fileCount} files • ${is3D ? '3D' : '2D'}`,
-      xref: 'paper',
-      yref: 'paper',
-      x: 0.02,
-      y: 0.98,
-      xanchor: 'left',
-      yanchor: 'top',
-      font: { size: 9, color: '#6b7280' },
-      showarrow: false,
-      bgcolor: 'rgba(255,255,255,0.8)',
-      bordercolor: '#e5e7eb',
-      borderwidth: 1,
-      borderpad: 2
-    }];
   }
 
   return (
@@ -702,7 +781,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   );
 };
 
-export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels }: EmbeddingPlotProps) => {
+export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels, verificationMode }: EmbeddingPlotProps) => {
   return (
     <div className="w-full h-full min-h-0 relative">
       <EmbeddingPlotContent
@@ -715,6 +794,7 @@ export const EmbeddingPlot = ({ selectedMethod = "pca", is3D = false, onPointSel
         onSelectionChange={onSelectionChange}
         externalData={externalData}
         externalSelectedLabels={externalSelectedLabels}
+        verificationMode={verificationMode}
       />
     </div>
   );

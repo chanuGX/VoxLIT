@@ -652,6 +652,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                   : undefined
               }
               externalSelectedLabels={verificationMode ? pairSelection : undefined}
+              verificationMode={verificationMode}
             />
           </div>
 
