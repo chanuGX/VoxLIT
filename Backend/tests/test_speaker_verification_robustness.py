@@ -799,6 +799,40 @@ async def test_perturbation_endpoint_noop_perturbation_creates_no_asset(client, 
 
 
 @pytest.mark.asyncio
+async def test_time_stretch_timeout_endpoint_creates_no_asset(
+    client, fake_dataset_dir, tmp_path, monkeypatch
+):
+    """Genuine (non-monkeypatched-identity) Time Stretch failure via a real
+    spawned-subprocess timeout, driven through the actual
+    /tasks/verification/perturbation endpoint -- proves the subprocess
+    isolation fix works end-to-end, not just at the perturb_and_compare
+    level, and that a real subprocess failure still yields a clean 422 with
+    no leaked session asset."""
+
+    monkeypatch.setattr("app.tasks.verification.session_assets._storage_root", lambda: tmp_path)
+    monkeypatch.setattr(pertubation_service._MP_CONTEXT, "Process", _TimingOutProcess)
+    monkeypatch.setattr(service, "get_model", _ModelLoadForbidden())
+
+    payload = {
+        "model": "ecapa-tdnn",
+        "recording_id": fake_dataset_dir[0],
+        "perturbation": {"type": "time_stretch", "params": {"stretch_factor": 1.5}},
+    }
+    response = await client.post("/tasks/verification/perturbation", json=payload)
+
+    assert response.status_code == 422
+
+    sid = response.cookies.get(settings.SESSION_COOKIE_NAME)
+    assert sid is not None
+    session_dir = tmp_path / sid
+    leftover = list(session_dir.iterdir()) if session_dir.is_dir() else []
+    assert leftover == []
+
+    listing = await client.get("/tasks/verification/session-assets")
+    assert listing.json()["assets"] == []
+
+
+@pytest.mark.asyncio
 async def test_perturbation_endpoint_transform_failure_creates_no_asset(client, fake_dataset_dir):
     payload = {
         "model": "ecapa-tdnn",

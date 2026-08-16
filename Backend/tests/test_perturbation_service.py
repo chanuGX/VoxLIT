@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from app.services import pertubation_service
-from app.services.pertubation_service import apply_pitch_shift
+from app.services.pertubation_service import apply_pitch_shift, apply_time_stretch
 
 
 def _make_waveform(sample_audio_data: np.ndarray, seconds: float = 1.0, sample_rate: int = 16000) -> torch.Tensor:
@@ -229,6 +229,178 @@ class TestTempDirectoryCleanup:
 
         with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_factory):
             apply_pitch_shift(waveform, 16000, 2.0)
+
+        assert observed_paths
+        tmp_dir = os.path.dirname(observed_paths[0])
+        assert not os.path.exists(tmp_dir)
+
+
+# ---------------------------------------------------------------------------
+# Time stretch: same spawned-subprocess isolation pattern as pitch shift.
+#
+# apply_time_stretch used to call librosa.effects.time_stretch directly
+# in-process. When a SpeechBrain speaker-verification model has already been
+# loaded in that same process, SpeechBrain's lazy-module machinery
+# interferes with librosa's own import resolution and time_stretch raises
+# ("Lazy import of LazyModule(...) failed"), which the old code silently
+# swallowed and returned the original waveform. These tests guard the
+# subprocess-isolated replacement.
+# ---------------------------------------------------------------------------
+
+
+class TestApplyTimeStretchSuccess:
+    """Real spawned subprocess, explicit spawn context."""
+
+    def test_time_stretch_lengthens_audio_for_rate_below_one(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        result = apply_time_stretch(waveform, 0.7)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape[-1] > waveform.shape[-1]
+
+    def test_time_stretch_shortens_audio_for_rate_above_one(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        result = apply_time_stretch(waveform, 1.6)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape[-1] < waveform.shape[-1]
+
+    def test_time_stretch_output_differs_from_original(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        result = apply_time_stretch(waveform, 1.6)
+
+        assert result.shape != waveform.shape
+
+    def test_time_stretch_output_is_finite_and_mono(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        result = apply_time_stretch(waveform, 0.7)
+
+        assert torch.isfinite(result).all()
+        assert result.dim() == 2
+        assert result.shape[0] == 1
+
+
+class TestApplyTimeStretchFromThreadPoolWorker:
+    """Reproduces Starlette's sync-route threadpool-worker execution context."""
+
+    def test_time_stretch_from_worker_thread(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(apply_time_stretch, waveform, 1.5)
+            result = future.result(timeout=60)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape[-1] < waveform.shape[-1]
+
+
+class TestApplyTimeStretchAlongsideSpeechBrain:
+    """
+    Reproduces the exact reported failure: SpeechBrain's lazy-import
+    machinery active in the parent process while a librosa transform runs.
+    Only imports the package (no .from_hparams(...) call, no weights, no
+    network access) -- this must never download or load a real model, per
+    project test policy.
+    """
+
+    def test_time_stretch_succeeds_after_speechbrain_import(self, sample_audio_data):
+        import speechbrain  # noqa: F401
+        from speechbrain.inference.classifiers import EncoderClassifier  # noqa: F401
+
+        waveform = _make_waveform(sample_audio_data, seconds=3.0)
+        result = apply_time_stretch(waveform, 1.5)
+
+        assert isinstance(result, torch.Tensor)
+        assert result.shape[-1] < waveform.shape[-1]
+
+
+class _ErrorReportingTimeStretchProcess(_FakeProcessBase):
+    """Simulates a child that exits quickly after writing error_path.
+    Time stretch's worker args are a 4-tuple (audio_np, rate, output_path,
+    error_path) -- one shorter than pitch shift's, since no sample_rate is
+    needed."""
+
+    def start(self):
+        _, _, _, error_path = self.args
+        with open(error_path, "w") as f:
+            f.write("boom")
+
+    def join(self, timeout=None):
+        pass
+
+    def is_alive(self):
+        return False
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+class TestApplyTimeStretchTimeout:
+    def test_timeout_falls_back_to_original_waveform(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data)
+
+        with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_HangingThenKilledProcess):
+            result = apply_time_stretch(waveform, 1.5, timeout_seconds=0.1)
+
+        assert torch.equal(result, waveform)
+
+    def test_timeout_calls_terminate(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data)
+        created = []
+
+        def _factory(*args, **kwargs):
+            proc = _HangingThenKilledProcess(*args, **kwargs)
+            created.append(proc)
+            return proc
+
+        with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_factory):
+            apply_time_stretch(waveform, 1.5, timeout_seconds=0.1)
+
+        assert len(created) == 1
+        assert created[0].terminate_called
+
+
+class TestApplyTimeStretchChildException:
+    def test_child_error_falls_back_to_original_waveform(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data)
+
+        with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_ErrorReportingTimeStretchProcess):
+            result = apply_time_stretch(waveform, 1.5)
+
+        assert torch.equal(result, waveform)
+
+
+class TestTimeStretchTempDirectoryCleanup:
+    def test_temp_dir_removed_after_timeout(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data)
+        observed_paths = []
+
+        def _factory(*args, **kwargs):
+            proc = _HangingThenKilledProcess(*args, **kwargs)
+            observed_paths.append(kwargs["args"][2])  # output_path
+            return proc
+
+        with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_factory):
+            apply_time_stretch(waveform, 1.5, timeout_seconds=0.1)
+
+        assert observed_paths
+        tmp_dir = os.path.dirname(observed_paths[0])
+        assert not os.path.exists(tmp_dir)
+
+    def test_temp_dir_removed_after_child_error(self, sample_audio_data):
+        waveform = _make_waveform(sample_audio_data)
+        observed_paths = []
+
+        def _factory(*args, **kwargs):
+            proc = _ErrorReportingTimeStretchProcess(*args, **kwargs)
+            observed_paths.append(kwargs["args"][2])  # output_path
+            return proc
+
+        with patch.object(pertubation_service._MP_CONTEXT, "Process", side_effect=_factory):
+            apply_time_stretch(waveform, 1.5)
 
         assert observed_paths
         tmp_dir = os.path.dirname(observed_paths[0])

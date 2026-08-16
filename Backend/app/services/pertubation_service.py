@@ -74,6 +74,59 @@ def _run_pitch_shift_subprocess(audio_np, sample_rate, n_steps, timeout_seconds:
 
         return np.load(output_path, allow_pickle=False)
 
+
+def _time_stretch_worker(audio_np, rate, output_path, error_path) -> None:
+    """
+    Runs in a child process (module-level so it's picklable under 'spawn').
+    Mirrors _pitch_shift_worker: writes the result to output_path on
+    success, or the error message to error_path on failure. No sample_rate
+    argument -- librosa.effects.time_stretch does not take one.
+    """
+    import librosa  # keep torch/speechbrain out of the child; only librosa/numpy needed
+    try:
+        stretched = librosa.effects.time_stretch(y=audio_np, rate=rate)
+        np.save(output_path, stretched, allow_pickle=False)
+    except Exception as e:
+        with open(error_path, "w") as f:
+            f.write(str(e))
+
+
+def _run_time_stretch_subprocess(audio_np, rate, timeout_seconds: float) -> Optional[np.ndarray]:
+    """
+    Runs librosa's time stretch in a spawned subprocess with a genuine,
+    enforceable timeout. Returns the stretched array on success, or None on
+    timeout, child failure, or missing output.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        output_path = os.path.join(tmp_dir, "stretched.npy")
+        error_path = os.path.join(tmp_dir, "error.txt")
+
+        proc = _MP_CONTEXT.Process(
+            target=_time_stretch_worker,
+            args=(audio_np, rate, output_path, error_path),
+            daemon=True,
+        )
+        proc.start()
+        proc.join(timeout=timeout_seconds)
+
+        timed_out = proc.is_alive()
+        if timed_out:
+            proc.terminate()
+            proc.join(timeout=2)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+
+        try:
+            proc.close()
+        except ValueError:
+            pass  # refused to close (still alive) - leave it to GC
+
+        if timed_out or os.path.exists(error_path) or not os.path.exists(output_path):
+            return None
+
+        return np.load(output_path, allow_pickle=False)
+
 def add_gaussian_noise(waveform, noise_level=0.005, seed: int | None = None):
     """
     waveform: Tensor [channels, time]
@@ -189,44 +242,38 @@ def apply_pitch_shift(waveform, sample_rate, pitch_shift_semitones, timeout_seco
         print("DEBUG: Returning original waveform")
         return waveform
 
-def apply_time_stretch(waveform, stretch_factor):
+def apply_time_stretch(waveform, stretch_factor, timeout_seconds: float = 30.0):
     """
     Apply time stretching to the waveform
     waveform: Tensor [channels, time]
-    stretch_factor: Factor to stretch time (1.0 = no change, >1.0 = slower, <1.0 = faster)
+    stretch_factor: Factor to stretch time (1.0 = no change, rate < 1.0 =
+    longer/slower, rate > 1.0 = shorter/faster)
     """
-    print(f"DEBUG: apply_time_stretch called with stretch_factor={stretch_factor}")
-    print(f"DEBUG: Input waveform shape: {waveform.shape}")
-    
     # Skip if no stretch needed
     if abs(stretch_factor - 1.0) < 0.01:
-        print("DEBUG: Skipping time stretch - factor too close to 1.0")
         return waveform
-    
+
     try:
-        # Use librosa for time stretching as it's more reliable
         # Convert to numpy for librosa
         if waveform.dim() > 1:
             # Take first channel if stereo
             audio_np = waveform[0].numpy()
         else:
             audio_np = waveform.numpy()
-        
-        print(f"DEBUG: Using librosa.effects.time_stretch with rate={stretch_factor}")
-        # Apply time stretch using librosa
-        stretched_audio = librosa.effects.time_stretch(
-            y=audio_np, 
-            rate=stretch_factor
-        )
-        
+
+        # Apply time stretch in a spawned subprocess with a genuine, killable
+        # timeout, isolated from any SpeechBrain modules already loaded in
+        # this process (see _run_pitch_shift_subprocess for the same pattern
+        # and its rationale).
+        stretched_audio = _run_time_stretch_subprocess(audio_np, stretch_factor, timeout_seconds)
+
+        if stretched_audio is None:
+            return waveform
+
         # Convert back to torch tensor
-        result = torch.from_numpy(stretched_audio).unsqueeze(0)  # Add channel dimension
-        print(f"DEBUG: Time stretch completed successfully, output shape: {result.shape}")
-        return result
-        
-    except Exception as e:
-        print(f"DEBUG: Time stretch failed with error: {e}")
-        print("DEBUG: Returning original waveform")
+        return torch.from_numpy(stretched_audio).unsqueeze(0)  # Add channel dimension
+
+    except Exception:
         return waveform
 
 def apply_perturbations(waveform, sample_rate, perturbations: List[Dict[str, Any]]) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
