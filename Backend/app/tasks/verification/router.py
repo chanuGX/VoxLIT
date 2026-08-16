@@ -10,15 +10,16 @@ from typing import Any
 
 import torch
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
 
 from dataclasses import asdict
 
 from app.services.dataset_service import media_type_for
 
-from . import cache, clustering
+from . import cache, clustering, session_assets
+from .audio_streaming import stream_audio_file
 from .dataset import (
     DatasetUnavailable,
     RecordingNotFound,
@@ -106,54 +107,7 @@ async def dataset_recording_audio(recording_id: str, request: Request):
         raise HTTPException(status_code=415, detail=str(error)) from error
 
     safe_name = f"{recording_id}{audio_path.suffix.lower()}"
-    file_size = audio_path.stat().st_size
-
-    range_header = request.headers.get("range")
-    if range_header:
-        try:
-            range_value = range_header.replace("bytes=", "")
-            start_str, _, end_str = range_value.partition("-")
-            start = int(start_str) if start_str else 0
-            end = int(end_str) if end_str else file_size - 1
-
-            start = max(0, min(start, file_size - 1))
-            end = max(start, min(end, file_size - 1))
-            content_length = end - start + 1
-
-            def generate_chunks():
-                with audio_path.open("rb") as handle:
-                    handle.seek(start)
-                    remaining = content_length
-                    while remaining > 0:
-                        chunk = handle.read(min(8192, remaining))
-                        if not chunk:
-                            break
-                        remaining -= len(chunk)
-                        yield chunk
-
-            return StreamingResponse(
-                generate_chunks(),
-                status_code=206,
-                media_type=media_type,
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes {start}-{end}/{file_size}",
-                    "Content-Length": str(content_length),
-                    "Content-Disposition": f'inline; filename="{safe_name}"',
-                },
-            )
-        except (ValueError, IndexError):
-            pass
-
-    return FileResponse(
-        path=audio_path,
-        media_type=media_type,
-        headers={
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "public, max-age=3600",
-            "Content-Disposition": f'inline; filename="{safe_name}"',
-        },
-    )
+    return stream_audio_file(audio_path, request, safe_name, media_type)
 
 
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
@@ -651,3 +605,138 @@ async def run_robustness_dataset(payload: RobustnessDatasetRequest):
     except (ValueError, RuntimeError) as error:
         status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
         raise HTTPException(status_code=status, detail=str(error)) from error
+
+
+# ---------------------------------------------------------------------------
+# Session asset registry -- secure, session-scoped audio recordings that are
+# neither the permanent demo dataset nor the flat, unscoped legacy `uploads/`
+# directory. Foundation for a later feature (perturbation comparison) that
+# will persist its result here; this commit only adds create/list/get/
+# stream/delete for a plain uploaded recording (`origin="upload"`).
+# ---------------------------------------------------------------------------
+
+
+def _require_sid(request: Request) -> str:
+    sid = getattr(request.state, "sid", None)
+    if not sid:
+        raise HTTPException(status_code=400, detail="No session id found.")
+    return sid
+
+
+@router.post("/session-assets/upload")
+async def upload_session_asset(request: Request, file: UploadFile = File(...)):
+    """Registers a fresh verification-task upload as a session-owned asset.
+
+    This is the one secure ingestion point for non-demo audio in this task
+    package -- unlike the legacy `/upload` route, the resulting id is bound
+    to the caller's own session and cannot be resolved by any other session.
+    """
+
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    suffix = _validate_upload(file)
+    temp_path = await run_in_threadpool(session_assets.begin_asset_write, validated_sid, suffix)
+    try:
+        await run_in_threadpool(_save_upload, file, temp_path)
+        return await session_assets.promote_asset(
+            temp_path, validated_sid, origin="upload", extension=suffix
+        )
+    except HTTPException:
+        await run_in_threadpool(temp_path.unlink, missing_ok=True)
+        raise
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+    finally:
+        await file.close()
+
+
+@router.get("/session-assets")
+async def list_session_assets_route(request: Request):
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+        return {"assets": await session_assets.list_session_assets(validated_sid)}
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+
+
+@router.get("/session-assets/{asset_id}")
+async def get_session_asset_route(asset_id: str, request: Request):
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+        metadata = await session_assets.get_session_asset_metadata(asset_id, validated_sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+    if metadata is None:
+        raise HTTPException(status_code=404, detail=f"Unknown or expired asset id: {asset_id}")
+    return metadata
+
+
+@router.get("/session-assets/{asset_id}/audio")
+@router.head("/session-assets/{asset_id}/audio")
+async def session_asset_audio(asset_id: str, request: Request):
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+        path = await session_assets.resolve_session_asset_path(asset_id, validated_sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except session_assets.SessionAssetNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+
+    try:
+        media_type = media_type_for(path)
+    except ValueError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+
+    safe_name = f"{asset_id}{path.suffix.lower()}"
+    return stream_audio_file(path, request, safe_name, media_type)
+
+
+@router.delete("/session-assets/{asset_id}")
+async def delete_session_asset_route(asset_id: str, request: Request):
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+        deleted = await session_assets.delete_session_asset(asset_id, validated_sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+    return {"deleted": deleted}
+
+
+@router.post("/session-assets/cleanup")
+async def cleanup_session_assets_route(request: Request):
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+        count = await session_assets.delete_all_session_assets(validated_sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503, detail="Speaker verification storage is temporarily unavailable."
+        ) from error
+    return {"deleted_count": count}

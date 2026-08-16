@@ -1,4 +1,7 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .core.session import SessionMiddleware
@@ -6,8 +9,21 @@ from .core.session import SessionMiddleware
 from .api.routes import session as session_routes, results as results_routes, inferences as inferences_routes, upload as upload_routes, health as health_routes
 from .api.routes import datasets as datasets_routes, saliency as saliency_routes, perturbations as perturbations_routes, dataset_management as dataset_management_routes, debug as debug_routes
 from .tasks import ACTIVE_TASK_MODULES, router as tasks_router
+from .tasks.verification import session_assets
 
-app = FastAPI(title="LIT for Voice – API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Real fallback cleanup for session-scoped verification assets -- Redis
+    # key expiry alone never deletes the corresponding disk file.
+    sweep_task = asyncio.create_task(session_assets.start_sweep_loop())
+    try:
+        yield
+    finally:
+        sweep_task.cancel()
+
+
+app = FastAPI(title="LIT for Voice – API", lifespan=lifespan)
 
 # Configure CORS origins - default to common development origins if not set
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
