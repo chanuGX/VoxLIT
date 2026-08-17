@@ -3,6 +3,7 @@ import { TaskDefinition, TaskId, PredictionResultsProps, WorkbenchCenterProps } 
 import { TranscriptionResults } from "@/features/transcription/TranscriptionResults";
 import { ClassificationResults } from "@/features/emotion/ClassificationResults";
 import { SpeakerVerificationWorkbench } from "@/features/verification";
+import { DiarizationWorkbench } from "@/features/task-b";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -102,14 +103,15 @@ export const TASKS: TaskDefinition[] = [
   {
     id: "task-b",
     route: "/tasks/task-b",
-    name: "Voice Task B",
-    shortDescription: "New audio interpretability task — details to be finalized.",
-    status: "placeholder",
-    models: [{ id: "task-b-model-1", label: "Model (to be added)", available: false }],
-    defaultModel: null,
-    datasets: [{ id: "task-b-dataset-1", label: "Dataset (to be added)", available: false }],
+    name: "Speaker Diarization",
+    shortDescription:
+      "Glass-box diarization with pyannote 3.1: per-segment confidence from the clustering's own embedding space, uncertainty shading, and an embedding explorer.",
+    status: "active",
+    models: [{ id: "pyannote-3.1", label: "pyannote 3.1", available: true }],
+    defaultModel: "pyannote-3.1",
+    datasets: [{ id: "ami-subset", label: "AMI Meetings (3-file subset)", available: false }],
     defaultDataset: null,
-    allowCustomDatasets: true,
+    allowCustomDatasets: false,
     capabilities: {
       saliency: false,
       attention: false,
@@ -184,6 +186,6 @@ export const TASK_SLOTS: Record<
   transcription: { PredictionResults: TranscriptionResults },
   emotion: { PredictionResults: ClassificationResults },
   verification: { WorkbenchCenter: SpeakerVerificationWorkbench },
-  "task-b": {},
+  "task-b": { WorkbenchCenter: DiarizationWorkbench },
   "task-c": {},
 };

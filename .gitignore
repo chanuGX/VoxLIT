@@ -1,3 +1,6 @@
 ".claude/" 
 .venv
 CLAUDE.md
+
+.env
+
