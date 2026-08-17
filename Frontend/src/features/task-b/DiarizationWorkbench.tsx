@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DiarizationTimeline } from "./DiarizationTimeline";
+import { SimilarityMatrix } from "./SimilarityMatrix";
 import { EmbeddingScatter } from "./EmbeddingScatter";
 import {
   DiarizationResult,
@@ -29,6 +30,34 @@ export const DiarizationWorkbench = ({ model, modelLabel }: DiarizationWorkbench
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+
+  // Queue for "play segment A, then segment B" from the similarity matrix.
+  const playQueueRef = useRef<{ start: number; end: number }[]>([]);
+
+  const handleTimeUpdate = () => {
+    const audio = audioRef.current;
+    const queue = playQueueRef.current;
+    if (!audio || queue.length === 0) return;
+    if (audio.currentTime >= queue[0].end) {
+      queue.shift();
+      if (queue.length > 0) {
+        audio.currentTime = queue[0].start;
+      } else {
+        audio.pause();
+      }
+    }
+  };
+
+  const playPair = (aId: string, bId: string) => {
+    const audio = audioRef.current;
+    const a = result?.segments.find((s) => s.id === aId);
+    const b = result?.segments.find((s) => s.id === bId);
+    if (!audio || !a || !b) return;
+    playQueueRef.current =
+      aId === bId ? [{ start: a.start, end: a.end }] : [a, b].map((s) => ({ start: s.start, end: s.end }));
+    audio.currentTime = playQueueRef.current[0].start;
+    audio.play().catch(() => undefined);
+  };
 
   useEffect(() => {
     const loadRecordings = async () => {
@@ -159,7 +188,15 @@ export const DiarizationWorkbench = ({ model, modelLabel }: DiarizationWorkbench
                 )}
               </Button>
             </div>
-            {audioUrl && <audio ref={audioRef} controls className="w-full" src={audioUrl} />}
+            {audioUrl && (
+              <audio
+                ref={audioRef}
+                controls
+                className="w-full"
+                src={audioUrl}
+                onTimeUpdate={handleTimeUpdate}
+              />
+            )}
           </CardContent>
         </Card>
 
@@ -210,6 +247,28 @@ export const DiarizationWorkbench = ({ model, modelLabel }: DiarizationWorkbench
             </CardContent>
           </Card>
         )}
+
+        {result && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">
+                4. Segment similarity matrix{" "}
+                <span className="font-normal text-muted-foreground">
+                  — example-based: click any cell to hear both segments
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <SimilarityMatrix
+                segments={result.segments}
+                embeddings={result.embeddings}
+                speakers={result.speakers}
+                onPlayPair={playPair}
+              />
+            </CardContent>
+          </Card>
+        )}
+
       </div>
     </div>
   );
