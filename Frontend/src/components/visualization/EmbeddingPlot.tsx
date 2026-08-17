@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import Plot from "react-plotly.js";
+// Same resolution react-plotly.js itself uses internally (its own entry
+// does `require('plotly.js/dist/plotly')`) -- importing that exact file
+// lets the bundler dedupe against the copy react-plotly.js already
+// includes, instead of pulling in a second, differently-resolved copy of
+// the whole plotly.js package.
+import Plotly from "plotly.js/dist/plotly";
 import { useEmbedding } from "../../contexts/EmbeddingContext";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -90,6 +96,60 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       window.removeEventListener('mouseup', rearm);
     };
   }, []);
+
+  // Reduction-method label used for 3D axis titles, plane dropdown labels,
+  // plane trace names, and the plane description text -- computed once,
+  // reused everywhere instead of each call site recomputing it.
+  const methodLabel = selectedMethod === 'umap' ? 'UMAP' : selectedMethod === 'tsne' ? 't-SNE' : 'PCA';
+
+  // --- 3D camera / 2D pan-range persistence -------------------------------
+  // Selecting a point (gold highlight), changing pair selection, or a table
+  // row click must never move the camera/view -- only a genuinely new
+  // projection (new model/reduction-method/dimension/batch) should.
+  //
+  // Confirmed empirically (temporary instrumentation + direct DOM reads of
+  // gd.layout/_fullLayout during a real 3D rotate): gl3d's orbit camera
+  // controller updates the live WebGL scene directly and does not reliably
+  // propagate back through react-plotly.js's onUpdate/onInitialized
+  // (figure.layout.scene.camera stayed at its unrotated default the entire
+  // time, even mid-rotation), so there is nothing meaningful to capture
+  // there. The actual fix is simpler: Plotly's own uirevision-driven
+  // preservation already keeps the live interactive camera/range intact
+  // across a Plotly.react() call, *as long as the incoming layout doesn't
+  // explicitly re-specify that property*. Explicitly re-specifying a
+  // "last known" camera/range on every render (the original approach here)
+  // is itself what overrides the live interactive state -- Plotly always
+  // treats an explicit value as an instruction to set it. So: only ever
+  // set camera/range explicitly on the one render that's genuinely
+  // resetting for a new projection; omit them on every other render and
+  // let uirevision do the preserving.
+  const plotContainerRef = useRef<HTMLDivElement>(null);
+  const DEFAULT_CAMERA = { eye: { x: 1.5, y: 1.5, z: 1.5 }, center: { x: 0, y: 0, z: 0 }, up: { x: 0, y: 0, z: 1 } };
+  // Last range this file's own right-drag pan (item 3 below) applied --
+  // read only to seed the *next* drag's starting point, and by the layout
+  // memo purely to decide whether a pan is in progress; never re-applied
+  // into the layout explicitly (see reasoning above).
+  const panRangeRef = useRef<{ x: [number, number]; y: [number, number] } | null>(null);
+
+  // Identity of the current projection: embeddingData.revision only changes
+  // on a genuine new publish (batch/reproject or fetchEmbeddings success --
+  // see EmbeddingContext.tsx), never on a click/selection re-render, and
+  // never collides across two different publishes even when they share the
+  // same model/method/dimensions/count. is3D is concatenated separately so
+  // toggling 2D/3D resets the view immediately, without waiting on the
+  // async reproject/fetch that will itself also bump revision shortly after.
+  const revisionKey = `${embeddingData?.revision ?? 'none'}|${is3D ? '3d' : '2d'}`;
+  const lastRevisionRef = useRef<string | null>(null);
+  let didResetViewThisRender = false;
+  if (lastRevisionRef.current !== null && lastRevisionRef.current !== revisionKey) {
+    // Reset synchronously during render (not in a useEffect) so the SAME
+    // render that detects a new projection already reflects the reset view.
+    // An effect-based reset would only take effect on some later, unrelated
+    // render, since mutating a ref never itself schedules a re-render.
+    panRangeRef.current = null;
+    didResetViewThisRender = true;
+  }
+  lastRevisionRef.current = revisionKey;
 
   // Generate mock data as fallback
   const generateMockData = () => {
@@ -248,7 +308,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           colorscale: [[0, 'rgba(59, 130, 246, 0.5)'], [1, 'rgba(59, 130, 246, 0.5)']], // Blue with higher opacity
           showscale: false,
           hoverinfo: 'skip',
-          name: 'X-Y Plane (Z=0)'
+          name: `${methodLabel} 1–2 plane (${methodLabel} 3 = 0)`
         };
       case 'xz': // X-Z plane through origin (Y = 0)
         return {
@@ -260,7 +320,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           colorscale: [[0, 'rgba(16, 185, 129, 0.5)'], [1, 'rgba(16, 185, 129, 0.5)']], // Green with higher opacity
           showscale: false,
           hoverinfo: 'skip',
-          name: 'X-Z Plane (Y=0)'
+          name: `${methodLabel} 1–3 plane (${methodLabel} 2 = 0)`
         };
       case 'yz': // Y-Z plane through origin (X = 0)
         return {
@@ -272,7 +332,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           colorscale: [[0, 'rgba(239, 68, 68, 0.5)'], [1, 'rgba(239, 68, 68, 0.5)']], // Red with higher opacity
           showscale: false,
           hoverinfo: 'skip',
-          name: 'Y-Z Plane (X=0)'
+          name: `${methodLabel} 2–3 plane (${methodLabel} 1 = 0)`
         };
       default:
         return null;
@@ -324,6 +384,119 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return [];
   }, [externalData, embeddingData]);
 
+  // Fallback starting range for the very first 2D right-drag pan, before any
+  // interaction has happened. Plotly's own autorange-computed values live
+  // only in the private `_fullLayout` (verified in plotly.js's
+  // plots/cartesian/autorange.js: `doAutoRange` writes to the internal `ax`
+  // object, not the public `gd.layout`), so this is derived purely from our
+  // own already-computed point coordinates instead -- simple min/max with
+  // 10% padding, matching the spirit of the 3D plane bounds calculation
+  // elsewhere in this file. Superseded by panRangeRef (this file's own
+  // right-drag pan, below) the moment a first drag establishes one.
+  const fallbackRange2D = useMemo(() => {
+    if (activePoints.length === 0) return null;
+    const xs = activePoints.map((p) => p.coordinates[0]);
+    const ys = activePoints.map((p) => p.coordinates[1]);
+    const xMin = Math.min(...xs), xMax = Math.max(...xs);
+    const yMin = Math.min(...ys), yMax = Math.max(...ys);
+    const xPad = (xMax - xMin) * 0.1 || 1;
+    const yPad = (yMax - yMin) * 0.1 || 1;
+    return {
+      x: [xMin - xPad, xMax + xPad] as [number, number],
+      y: [yMin - yPad, yMax + yPad] as [number, number],
+    };
+  }, [activePoints]);
+
+  // Right-drag panning for 2D. Plotly's cartesian dragmode applies
+  // uniformly regardless of mouse button -- there's no built-in "left
+  // selects, right pans" split for scatter traces (unlike gl3d's own
+  // 'orbit' dragmode, which already natively supports left-drag-rotate,
+  // right-drag-pan, and wheel-zoom for free, so 3D needs none of this).
+  // Driven via the public, documented Plotly.relayout(gd, updateObj) API,
+  // since Plotly's own dragmode can't be told to do this. Gated on !is3D so
+  // 3D's native orbit interactions and the plane-controls panel are
+  // untouched.
+  useEffect(() => {
+    if (is3D) return;
+    const container = plotContainerRef.current;
+    if (!container) return;
+
+    const MARGIN = { l: 35, r: 35, t: 35, b: 35 };
+    let dragging = false;
+    let startClientX = 0;
+    let startClientY = 0;
+    let startRange: { x: [number, number]; y: [number, number] } | null = null;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragging || !startRange) return;
+      const rect = container.getBoundingClientRect();
+      const plotWidth = Math.max(1, rect.width - MARGIN.l - MARGIN.r);
+      const plotHeight = Math.max(1, rect.height - MARGIN.t - MARGIN.b);
+
+      const pixelDeltaX = e.clientX - startClientX;
+      const pixelDeltaY = e.clientY - startClientY;
+
+      const xSpan = startRange.x[1] - startRange.x[0];
+      const ySpan = startRange.y[1] - startRange.y[0];
+
+      // "Grab and drag" panning: content follows the cursor. Screen X and
+      // data X increase in the same direction, so dragging right shifts the
+      // range left by the equivalent data-space amount. Screen Y increases
+      // downward while data Y increases upward, so Y's shift direction is
+      // inverted relative to X's.
+      const dataDeltaX = (pixelDeltaX / plotWidth) * xSpan;
+      const dataDeltaY = (pixelDeltaY / plotHeight) * ySpan;
+
+      const newXRange: [number, number] = [startRange.x[0] - dataDeltaX, startRange.x[1] - dataDeltaX];
+      const newYRange: [number, number] = [startRange.y[0] + dataDeltaY, startRange.y[1] + dataDeltaY];
+
+      panRangeRef.current = { x: newXRange, y: newYRange };
+
+      const gd = plotRef.current?.el;
+      if (gd) {
+        Plotly.relayout(gd, { 'xaxis.range': newXRange, 'yaxis.range': newYRange });
+      }
+    };
+
+    const handleMouseUp = () => {
+      dragging = false;
+      startRange = null;
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 2) return; // left-button clicks/drags fall through to Plotly untouched
+      e.preventDefault();
+      e.stopPropagation();
+
+      const baseline = panRangeRef.current ?? fallbackRange2D;
+      if (!baseline) return; // nothing plotted yet -- nothing to pan
+
+      dragging = true;
+      startClientX = e.clientX;
+      startClientY = e.clientY;
+      startRange = baseline;
+
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    };
+
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
+    container.addEventListener('mousedown', handleMouseDown, true);
+    container.addEventListener('contextmenu', handleContextMenu);
+
+    return () => {
+      container.removeEventListener('mousedown', handleMouseDown, true);
+      container.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [is3D, fallbackRange2D]);
+
   // Select points based on angle range - memoized to prevent unnecessary recalculations
   const selectedFiles = useMemo(() => {
     if (!is3D || selectedPlane === 'none' || activePoints.length === 0) {
@@ -355,11 +528,10 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
   // Traces are memoized so an unrelated re-render (e.g. a click's own state
   // update) doesn't rebuild data/traces with a new identity every time.
   // react-plotly.js calls Plotly.react() whenever the data/layout prop
-  // reference changes, and repeated Plotly.react() calls on the gl3d scene
-  // were the confirmed cause of a single physical 3D click invoking
-  // handlePointClick twice (traced via temporary instrumentation: two
-  // identical curveNumber/customdata firings per click, eliminated once
-  // traces/layout stopped changing identity on every render).
+  // reference changes -- measured to have no effect on the double-click bug
+  // (see clickGestureHandledRef above for the actual fix), but still
+  // worthwhile so an unrelated re-render never rebuilds the plotted points
+  // themselves, only marker highlight state.
   const traces = useMemo(() => {
     const plotData = getPlotData();
     const { x, y, colors, text } = plotData;
@@ -540,12 +712,16 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       },
       dragmode: is3D ? 'orbit' : (selectionMode === 'box' ? 'select' : 'lasso'),
       hovermode: 'closest',
-      uirevision: true // Maintains UI state on data updates
+      // Changes only when the projection genuinely changes (new model/
+      // reduction-method/dimension/batch, or 2D<->3D) -- never on a mere
+      // point/pair/table selection. Combined with feeding the live-captured
+      // camera/range back in below, this is what keeps the view stable
+      // across selection while still resetting for a real new projection.
+      uirevision: revisionKey
     };
 
     if (is3D) {
       // Axis titles reflect the active reduction method, e.g. "PCA 1"/"UMAP 2"/"t-SNE 3".
-      const methodLabel = selectedMethod === 'umap' ? 'UMAP' : selectedMethod === 'tsne' ? 't-SNE' : 'PCA';
       const axisTitle = (n: 1 | 2 | 3) => `${methodLabel} ${n}`;
 
       // 3D scene configuration
@@ -590,14 +766,20 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           linecolor: '#9ca3af'
         },
         bgcolor: 'white',
-        camera: {
-          eye: { x: 1.5, y: 1.5, z: 1.5 },
-          center: { x: 0, y: 0, z: 0 },
-          up: { x: 0, y: 0, z: 1 }
-        },
         aspectmode: 'cube',
         dragmode: 'orbit'
       };
+      // Only explicitly set `camera` on the render that just reset it for a
+      // genuine new projection. On every other render, leave it unset and
+      // let Plotly's own uirevision-driven preservation keep whatever the
+      // user is currently looking at -- explicitly re-specifying `camera`
+      // on every render (even to a captured "latest known" value) is what
+      // actually overrides the live interactive camera: Plotly always
+      // treats an explicit value as an instruction to set it, real
+      // interactive rotation notwithstanding.
+      if (didResetViewThisRender) {
+        result.scene.camera = DEFAULT_CAMERA;
+      }
     } else {
       // 2D axis configuration with enhanced zoom support
       result.xaxis = {
@@ -620,6 +802,18 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
         zerolinewidth: 1,
         fixedrange: false // Allow zoom
       };
+      // Same reasoning as the 3D camera above (and empirically confirmed
+      // the same way): explicitly re-specifying xaxis/yaxis.range on every
+      // render -- even to a captured "latest known" value -- is what
+      // overrides Plotly's own uirevision-driven preservation of the live
+      // pan/zoom (whether from a native Plotly zoom or this file's own
+      // right-drag Plotly.relayout calls). Only force a fresh autorange on
+      // the render that just reset for a genuine new projection; leave
+      // range/autorange untouched on every other render.
+      if (didResetViewThisRender) {
+        result.xaxis.autorange = true;
+        result.yaxis.autorange = true;
+      }
     }
 
     // Add compact annotation
@@ -643,7 +837,8 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     }
 
     return result;
-  }, [is3D, selectedPlane, selectionMode, selectedMethod, embeddingData, isExternal, externalData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [is3D, selectedPlane, selectionMode, selectedMethod, embeddingData, isExternal, externalData, revisionKey, methodLabel, didResetViewThisRender]);
 
   if (verificationMode && !isExternal) {
     return (
@@ -677,8 +872,12 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     );
   }
 
+  const instructionText = is3D
+    ? 'Left drag: rotate • Right drag: pan • Wheel: zoom'
+    : 'Left drag: select • Right drag: pan • Wheel: zoom';
+
   return (
-    <div className="w-full h-full min-h-0 relative">
+    <div ref={plotContainerRef} className="w-full h-full min-h-0 relative">
       {/* Plane Selection Controls - Only show in 3D mode */}
       {is3D && (
         <div className="absolute top-2 right-2 z-10 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-md p-2 shadow-sm">
@@ -695,9 +894,9 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="none">None</SelectItem>
-                <SelectItem value="xy">X-Y</SelectItem>
-                <SelectItem value="xz">X-Z</SelectItem>
-                <SelectItem value="yz">Y-Z</SelectItem>
+                <SelectItem value="xy">{methodLabel} 1–2</SelectItem>
+                <SelectItem value="xz">{methodLabel} 1–3</SelectItem>
+                <SelectItem value="yz">{methodLabel} 2–3</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -743,14 +942,20 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
           
           {selectedPlane !== 'none' && (
             <div className="text-[10px] text-gray-500 mt-1">
-              {selectedPlane === 'xy' && '🔵 Blue plane: X-Y (Z=0)'}
-              {selectedPlane === 'xz' && '🟢 Green plane: X-Z (Y=0)'}
-              {selectedPlane === 'yz' && '🔴 Red plane: Y-Z (X=0)'}
+              {selectedPlane === 'xy' && `🔵 Blue plane: ${methodLabel} 1–2`}
+              {selectedPlane === 'xz' && `🟢 Green plane: ${methodLabel} 1–3`}
+              {selectedPlane === 'yz' && `🔴 Red plane: ${methodLabel} 2–3`}
             </div>
           )}
         </div>
       )}
-      
+
+      {/* Interaction hint, bottom-left so it never collides with the
+          top-left "N files" Plotly annotation or the top-right plane panel. */}
+      <div className="absolute bottom-2 left-2 z-10 bg-white/95 backdrop-blur-sm border border-gray-200 rounded-md px-2 py-1 text-[10px] text-gray-500 pointer-events-none">
+        {instructionText}
+      </div>
+
       <Plot
         ref={plotRef}
         data={traces}

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { API_BASE } from '@/lib/api';
 
 export interface EmbeddingPoint {
@@ -28,6 +28,14 @@ export interface EmbeddingData {
   /** From BatchProjectionResponse when set directly (Speaker Verification only). */
   reduction_method_used?: string;
   effective_components?: number;
+  /** Monotonically-increasing id stamped by EmbeddingProvider on every real
+   *  publish (fetchEmbeddings success or setEmbeddingDataDirect call) --
+   *  never derived from content fields, so two publishes with identical
+   *  model/reduction_method/n_components/total_files (e.g. re-selecting a
+   *  different batch) still get distinct ids. Used by EmbeddingPlot to know
+   *  when the actual projection changed vs. an unrelated re-render (row/
+   *  point selection), e.g. to decide whether to reset the 3D camera. */
+  revision: number;
 }
 
 interface EmbeddingContextType {
@@ -45,8 +53,9 @@ interface EmbeddingContextType {
   /** Directly sets embeddingData, bypassing fetchEmbeddings/the legacy
    *  /inferences/embeddings endpoint entirely. Used by Speaker Verification
    *  to publish batch/project results into the same context EmbeddingPanel
-   *  already reads. */
-  setEmbeddingDataDirect: (data: EmbeddingData | null) => void;
+   *  already reads. `revision` is stamped internally on every call -- never
+   *  supplied by the caller. */
+  setEmbeddingDataDirect: (data: Omit<EmbeddingData, 'revision'> | null) => void;
 }
 
 const EmbeddingContext = createContext<EmbeddingContextType | undefined>(undefined);
@@ -63,6 +72,19 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [embeddingData, setEmbeddingData] = useState<EmbeddingData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const revisionCounterRef = useRef(0);
+
+  // Single path every real publish goes through, so `revision` always gets
+  // a fresh id -- never skipped, never derived from (and therefore never
+  // collidable with) the data's own content fields.
+  const publish = useCallback((data: Omit<EmbeddingData, 'revision'> | null) => {
+    if (data === null) {
+      setEmbeddingData(null);
+      return;
+    }
+    revisionCounterRef.current += 1;
+    setEmbeddingData({ ...data, revision: revisionCounterRef.current });
+  }, []);
 
   const fetchEmbeddings = useCallback(async (
     model: string,
@@ -100,7 +122,7 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       }
 
       const data = await response.json();
-      setEmbeddingData(data);
+      publish(data);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to fetch embeddings';
       setError(errorMessage);
@@ -108,17 +130,17 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [publish]);
 
   const clearEmbeddings = useCallback(() => {
     setEmbeddingData(null);
     setError(null);
   }, []);
 
-  const setEmbeddingDataDirect = useCallback((data: EmbeddingData | null) => {
-    setEmbeddingData(data);
+  const setEmbeddingDataDirect = useCallback((data: Omit<EmbeddingData, 'revision'> | null) => {
+    publish(data);
     setError(null);
-  }, []);
+  }, [publish]);
 
   return (
     <EmbeddingContext.Provider value={{
