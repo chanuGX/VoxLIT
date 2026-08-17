@@ -9,8 +9,9 @@ import { WaveformViewer } from "../audio/WaveformViewer";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
-import { UploadedFile, DatasetRecordingRef } from '@/tasks/types';
+import { UploadedFile, DatasetRecordingRef, LocalFilePreview } from '@/tasks/types';
 import { isVerificationDemoDataset } from '@/tasks/registry';
+import { verificationAudioUrl } from '@/features/verification/audioUrl';
 
 interface PerturbationResult {
   perturbed_file: string;
@@ -37,6 +38,11 @@ interface DatapointEditorPanelProps {
   /** Speaker Verification only: the safe demo-dataset recording list, used to
    *  resolve a selected opaque recording_id to its display_filename/extension/size. */
   datasetRecordings?: DatasetRecordingRef[] | null;
+  /** Speaker Verification only: a temporary local device-file preview (Pair
+   *  Verification enrollment/probe upload). Takes priority over selectedFile
+   *  when set — never a real backend id, never resolved through any backend
+   *  audio endpoint. */
+  localPreview?: LocalFilePreview | null;
   /**
    * Task-specific results card (from the registry's TASK_SLOTS), rendered
    * between Sample Info and Audio Playback. Receives the current
@@ -54,6 +60,7 @@ export const DatapointEditorPanel = ({
   predictionMap,
   renderPredictionResults,
   datasetRecordings,
+  localPreview,
 }: DatapointEditorPanelProps) => {
   const [selectedLabel, setSelectedLabel] = useState<string>("neutral");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -75,18 +82,20 @@ export const DatapointEditorPanel = ({
     : null;
 
   const audioUrl = (() => {
+    // Temporary local device file (Speaker Verification Pair Verification
+    // upload): play directly from its local blob URL, bypassing every
+    // backend URL branch below entirely.
+    if (localPreview) {
+      return localPreview.previewUrl;
+    }
+
     // Demo-dataset recordings: stream by opaque recording_id only, through
     // the task-specific audio endpoint. Falls through to undefined (safe,
     // same as "no file selected") if the id hasn't resolved against the
     // loaded recording list yet.
     if (isDemoDatasetPlayback) {
       if (!demoRecording) return undefined;
-      // Session-scoped assets (uploads + perturbation outputs) stream through
-      // a different route than demo recordings — distinguished by id prefix.
-      const isSessionAsset = demoRecording.recording_id.startsWith('asset_');
-      return isSessionAsset
-        ? `${API_BASE}/tasks/verification/session-assets/${encodeURIComponent(demoRecording.recording_id)}/audio`
-        : `${API_BASE}/tasks/verification/dataset/recordings/${encodeURIComponent(demoRecording.recording_id)}/audio`;
+      return verificationAudioUrl(demoRecording.recording_id);
     }
 
     // If showing perturbed audio and it's available
@@ -137,6 +146,21 @@ export const DatapointEditorPanel = ({
 
   // Get current file info (original or perturbed) with better data handling
   const currentFileInfo = (() => {
+    // Local device file: filename/extension/size come straight from the
+    // browser File object; duration/sample_rate are left undefined here so
+    // the render falls through to audioMetadata, populated once WaveSurfer
+    // decodes the local blob URL — same fallback chain as demo recordings.
+    if (localPreview) {
+      const dotIndex = localPreview.file.name.lastIndexOf(".");
+      return {
+        filename: localPreview.file.name,
+        duration: undefined,
+        sample_rate: undefined,
+        size: localPreview.file.size,
+        extension: dotIndex >= 0 ? localPreview.file.name.slice(dotIndex + 1) : undefined,
+      };
+    }
+
     if (showPerturbed && perturbationResult?.success) {
       return {
         filename: perturbationResult.filename,
@@ -196,7 +220,7 @@ export const DatapointEditorPanel = ({
     if (wavesurferRef.current) {
       wavesurferRef.current.stop();
     }
-  }, [selectedFile?.file_id, dataset, showPerturbed, perturbationResult?.filename]);
+  }, [selectedFile?.file_id, dataset, showPerturbed, perturbationResult?.filename, localPreview?.localId]);
   
   return (
     <TooltipProvider>
@@ -276,6 +300,14 @@ export const DatapointEditorPanel = ({
             </div>
           </CardHeader>
           <CardContent className="space-y-1.5">
+            {localPreview && (
+              <div className="text-xs-tight">
+                <span className="text-gray-500">Role:</span>
+                <span className="ml-2 text-gray-700">
+                  {localPreview.role === "enrollment" ? "Enrollment reference" : "Probe"}
+                </span>
+              </div>
+            )}
             <div className="text-xs-tight">
               <span className="text-gray-500">File:</span>
               <span className="ml-2 font-mono text-gray-700">{currentFileInfo?.filename || "No file selected"}</span>
@@ -290,7 +322,7 @@ export const DatapointEditorPanel = ({
                   ? `${currentFileInfo.duration.toFixed(1)}s`
                   : audioMetadata.duration
                   ? `${audioMetadata.duration.toFixed(1)}s`
-                  : isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
+                  : !localPreview && isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             <div className="text-xs-tight">
@@ -300,7 +332,7 @@ export const DatapointEditorPanel = ({
                   ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz`
                   : audioMetadata.sampleRate
                   ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz`
-                  : isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
+                  : !localPreview && isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             {currentFileInfo?.extension && (
@@ -362,7 +394,7 @@ export const DatapointEditorPanel = ({
             <WaveformViewer
               audioUrl={audioUrl}
               isPlaying={isPlaying}
-              requireCredentials={isDemoDatasetPlayback}
+              requireCredentials={!localPreview && isDemoDatasetPlayback}
               onReady={(wavesurfer) => {
 
                 wavesurferRef.current = wavesurfer;

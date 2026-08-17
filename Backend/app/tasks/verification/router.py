@@ -35,6 +35,7 @@ from .service import (
     SpeakerModelUnavailable,
     UnsupportedSpeakerModel,
     assemble_batch_analysis,
+    compute_saliency_map,
     extract_batch_embeddings,
     get_model_spec,
     list_models,
@@ -527,6 +528,151 @@ async def run_temporal_occlusion(
                 enrollment_paths,
                 probe_path,
                 segment_count,
+            )
+    except HTTPException:
+        raise
+    except (ValueError, RuntimeError) as error:
+        status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
+        raise HTTPException(status_code=status, detail=str(error)) from error
+    finally:
+        if enrollment_files:
+            for upload in enrollment_files:
+                await upload.close()
+        if probe_file is not None:
+            await probe_file.close()
+
+
+MAX_CLUSTER_REFERENCE_COUNT = 99  # batch cap (100) minus the target itself
+
+
+async def _resolve_cluster_saliency_inputs(
+    request: Request,
+    reference_recording_ids: list[str],
+    target_recording_id: str | None,
+) -> tuple[list[Path], Path]:
+    """1-99 unique reference ids + one target id, none overlapping.
+
+    Cluster membership is never known to the backend -- the frontend is the
+    only place a batch result (and therefore a cluster assignment) exists,
+    so `reference_recording_ids` is trusted caller input, not something this
+    endpoint derives or validates against any stored clustering (there is
+    none; clustering.py is never imported here). What IS enforced: a sane
+    count bound (matching the batch endpoints' own 2-100 cap, minus the
+    excluded target), no duplicate ids (a duplicate would silently
+    double-weight that recording in the centroid mean), and the target never
+    appearing in its own reference set. Deliberately separate from
+    `_resolve_verification_inputs`, whose 3-5 bound does not apply here."""
+
+    if not reference_recording_ids:
+        raise HTTPException(status_code=422, detail="Provide at least one reference recording id.")
+    if len(reference_recording_ids) > MAX_CLUSTER_REFERENCE_COUNT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Provide at most {MAX_CLUSTER_REFERENCE_COUNT} reference recording ids.",
+        )
+    if len(reference_recording_ids) != len(set(reference_recording_ids)):
+        raise HTTPException(status_code=422, detail="Duplicate reference recording ids are not allowed.")
+    if not target_recording_id:
+        raise HTTPException(status_code=422, detail="Provide a target recording id.")
+    if target_recording_id in reference_recording_ids:
+        raise HTTPException(status_code=422, detail="Target recording must not also be a reference recording.")
+
+    sid = _require_sid(request)
+    try:
+        validated_sid = session_assets.validate_and_canonicalize_sid(sid)
+    except session_assets.InvalidSessionId as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    reference_paths = [
+        await _resolve_audio_source(recording_id, validated_sid)
+        for recording_id in reference_recording_ids
+    ]
+    target_path = await _resolve_audio_source(target_recording_id, validated_sid)
+    return reference_paths, target_path
+
+
+@router.post("/explain/saliency")
+async def run_saliency_map(
+    request: Request,
+    model: str = Form(...),
+    reference_type: str = Form(...),
+    segment_count: int = Form(8),
+    enrollment_files: list[UploadFile] = File(default_factory=list),
+    probe_file: UploadFile | None = File(None),
+    enrollment_recording_ids: list[str] = Form(default_factory=list),
+    probe_recording_id: str | None = Form(None),
+    reference_recording_ids: list[str] = Form(default_factory=list),
+    target_recording_id: str | None = Form(None),
+    cluster_id: str | None = Form(None),
+):
+    """Generalized saliency map, generalizing `/explain/temporal-occlusion`
+    with a `reference_type`:
+
+    - "cluster": >=1 reference recording ids (no upload variant -- cluster
+      members always come from an already-run batch, which is always
+      id-based) plus a target recording id. Enrollment/probe fields are
+      rejected outright if present.
+    - "enrollment": identical to `/verify`/the old occlusion endpoint --
+      3-5 enrollment recordings (ids or uploaded files) plus a probe.
+      Cluster-only fields are rejected outright if present.
+
+    `/explain/temporal-occlusion` is untouched and keeps serving the raw-file
+    -upload Pair Verification flow unchanged.
+    """
+
+    if reference_type not in ("cluster", "enrollment"):
+        raise HTTPException(status_code=422, detail="reference_type must be 'cluster' or 'enrollment'.")
+    if not 4 <= segment_count <= 20:
+        raise HTTPException(status_code=422, detail="Choose between 4 and 20 occlusion segments.")
+
+    # Strict mutual exclusivity -- fields belonging to the other mode are
+    # rejected outright, never silently ignored.
+    if reference_type == "cluster":
+        if enrollment_files or probe_file is not None or enrollment_recording_ids or probe_recording_id:
+            raise HTTPException(
+                status_code=422,
+                detail="reference_type=cluster does not accept enrollment/probe fields.",
+            )
+    else:
+        if reference_recording_ids or target_recording_id or cluster_id:
+            raise HTTPException(
+                status_code=422,
+                detail="reference_type=enrollment does not accept cluster reference/target/cluster_id fields.",
+            )
+
+    try:
+        get_model_spec(model)
+    except UnsupportedSpeakerModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        with TemporaryDirectory(prefix="voxlit-sv-saliency-") as temp_dir:
+            temp_path = Path(temp_dir)
+            if reference_type == "cluster":
+                reference_paths, target_path = await _resolve_cluster_saliency_inputs(
+                    request, reference_recording_ids, target_recording_id
+                )
+                response_cluster_id, response_target_id = cluster_id, target_recording_id
+            else:
+                reference_paths, target_path = await _resolve_verification_inputs(
+                    request,
+                    enrollment_files,
+                    probe_file,
+                    enrollment_recording_ids,
+                    probe_recording_id,
+                    temp_path,
+                )
+                response_cluster_id, response_target_id = None, probe_recording_id
+
+            return await run_in_threadpool(
+                compute_saliency_map,
+                model,
+                reference_paths,
+                target_path,
+                reference_type=reference_type,
+                cluster_id=response_cluster_id,
+                target_recording_id=response_target_id,
+                segment_count=segment_count,
             )
     except HTTPException:
         raise
