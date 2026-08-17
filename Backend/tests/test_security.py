@@ -19,12 +19,20 @@ from httpx import AsyncClient
 from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 from app.main import app
+from app.services import custom_dataset_service
 import json
 import base64
 import hashlib
 import os
 from pathlib import Path
 import tempfile
+
+
+@pytest.fixture(autouse=True)
+def _isolated_custom_dataset_storage(monkeypatch, tmp_path):
+    """Every test in this module gets its own custom-dataset storage root,
+    so none of them ever touch the real Backend/uploads/sessions directory."""
+    monkeypatch.setattr(custom_dataset_service, "SESSIONS_BASE_DIR", tmp_path / "sessions")
 
 
 class TestAuthenticationSecurity:
@@ -112,19 +120,49 @@ class TestInputValidationSecurity:
     
     @pytest.mark.asyncio
     async def test_file_path_traversal_prevention(self):
-        """Test prevention of directory traversal attacks."""
+        """Test prevention of directory traversal attacks against the real
+        custom-dataset file-serving route, which is the only route in this
+        codebase that accepts an arbitrary `:path`-typed segment and
+        resolves it against a per-session directory. Every attempt must be
+        rejected with exactly 400 (invalid filename) -- never a 200, and
+        never silently ignored via a generic status-code allowlist that
+        would also pass if the traversal succeeded."""
         async with AsyncClient(app=app, base_url="http://test") as client:
+            create_resp = await client.post(
+                "/upload/dataset/create", data={"dataset_name": "TraversalTarget"}
+            )
+            assert create_resp.status_code == 201
+            dataset_id = create_resp.json()["dataset_name"]
+            await client.post(
+                "/upload/dataset/TraversalTarget/files",
+                files={"files": ("clip.wav", b"fake audio content", "audio/wav")},
+            )
+
+            # Note: a plain, unencoded "../../../etc/passwd" is collapsed by
+            # httpx's own RFC-3986 dot-segment normalization before the
+            # request is even sent (real HTTP clients do this too), so it
+            # never reaches our route at all -- that's not a test of this
+            # server's validation. These payloads are chosen specifically
+            # because they survive client-side URL construction unchanged
+            # (confirmed via `httpx.URL(...).raw_path`) and therefore
+            # actually exercise `validate_uploaded_filename()` server-side.
             path_traversal_attempts = [
-                "../../../etc/passwd",
-                "..\\..\\windows\\system32\\config\\sam",
-                "....//....//....//etc//passwd",
-                "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",
-                "..%252f..%252f..%252fetc%252fpasswd"
+                "..%2f..%2f..%2fetc%2fpasswd",  # single percent-encoded slash
+                "..\\..\\windows\\system32\\config\\sam",  # backslash, not URL-normalized
+                "....//....//....//etc//passwd",  # contains raw '/', not '..'-shaped
+                "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd",  # fully percent-encoded
+                "..%252f..%252f..%252fetc%252fpasswd",  # double-encoded
             ]
-            
+
             for path in path_traversal_attempts:
-                response = await client.get(f"/files/{path}")
-                assert response.status_code in [400, 403, 404], f"Should block path traversal: {path}"
+                response = await client.get(f"/{dataset_id}/file/{path}")
+                # This route (datasets.py, shared with built-in datasets)
+                # deliberately maps every rejection -- unknown dataset,
+                # cross-session, or an invalid filename -- to a uniform 404,
+                # so a traversal probe is indistinguishable from a dataset
+                # that simply doesn't exist (see dataset_service.py).
+                assert response.status_code == 404, f"Should block path traversal: {path} (got {response.status_code})"
+                assert b"root:" not in response.content
     
     @pytest.mark.asyncio
     async def test_large_payload_handling(self):
@@ -258,71 +296,183 @@ class TestAPISecurityMeasures:
 
 
 class TestFileUploadSecurity:
-    """Test file upload security measures."""
-    
+    """Test file upload security measures against the real Custom Dataset
+    Manager upload route (`POST /upload/dataset/{dataset_name}/files`) --
+    the actual endpoint this feature exposes, not the nonexistent
+    `/upload/audio`. Assertions require the specific, intended rejection
+    status, not a broad allowlist that would also pass on a bypass."""
+
     @pytest.mark.asyncio
     async def test_file_type_validation(self):
         """Test that only allowed file types are accepted."""
         async with AsyncClient(app=app, base_url="http://test") as client:
-            # Test with various file types
+            create_resp = await client.post("/upload/dataset/create", data={"dataset_name": "TypeCheck"})
+            assert create_resp.status_code == 201
+
             malicious_files = [
                 ("malicious.exe", b"MZ\x90\x00", "application/octet-stream"),
                 ("script.php", b"<?php echo 'test'; ?>", "text/plain"),
                 ("test.bat", b"@echo off\necho test", "text/plain"),
             ]
-            
+
             for filename, content, content_type in malicious_files:
-                files = {"file": (filename, content, content_type)}
-                response = await client.post("/upload/audio", files=files)
-                
-                # Should reject dangerous file types or handle gracefully
-                # 405 = Method not allowed, 422 = Validation error, 400 = Bad request, 415 = Unsupported media type
-                assert response.status_code in [400, 405, 415, 422], f"Should reject dangerous file: {filename} (got {response.status_code})"
-    
+                files = {"files": (filename, content, content_type)}
+                response = await client.post("/upload/dataset/TypeCheck/files", files=files)
+                assert response.status_code == 400, f"Should reject dangerous file: {filename} (got {response.status_code})"
+
+            # Nothing from the rejected uploads should have reached disk.
+            list_resp = await client.get("/upload/dataset/TypeCheck/metadata")
+            assert list_resp.json()["total_files"] == 0
+
     @pytest.mark.asyncio
-    async def test_file_size_limits(self):
-        """Test file size limits are enforced."""
+    async def test_file_size_limits(self, monkeypatch):
+        """Test that oversized files are rejected with 413 and leave no
+        partial file behind, without needing to actually upload 50MB."""
+        monkeypatch.setattr(custom_dataset_service, "MAX_FILE_BYTES", 1000)
         async with AsyncClient(app=app, base_url="http://test") as client:
-            # Create a moderately large file content for testing (1MB)
-            large_content = b"A" * (1024 * 1024)  # 1MB
-            
-            files = {"file": ("large_file.wav", large_content, "audio/wav")}
-            response = await client.post("/upload/audio", files=files)
-            
-            # Should handle appropriately - may reject or process based on server limits
-            # 405 = Method not allowed, 413 = Payload too large, 422 = Validation error, 400 = Bad request
-            assert response.status_code in [200, 400, 405, 413, 422], f"Should handle large files appropriately (got {response.status_code})"
-    
+            create_resp = await client.post("/upload/dataset/create", data={"dataset_name": "SizeCheck"})
+            assert create_resp.status_code == 201
+
+            large_content = b"A" * 5000
+            files = {"files": ("large_file.wav", large_content, "audio/wav")}
+            response = await client.post("/upload/dataset/SizeCheck/files", files=files)
+
+            assert response.status_code == 413, f"Should reject oversized file with 413 (got {response.status_code})"
+            metadata_resp = await client.get("/upload/dataset/SizeCheck/metadata")
+            assert metadata_resp.json()["total_files"] == 0
+
     @pytest.mark.asyncio
     async def test_filename_sanitization(self):
-        """Test that filenames are properly sanitized."""
+        """Dangerous filenames must always be rejected outright (400) --
+        never silently accepted-with-sanitization and never used as-is for
+        a filesystem path."""
         async with AsyncClient(app=app, base_url="http://test") as client:
+            create_resp = await client.post("/upload/dataset/create", data={"dataset_name": "NameCheck"})
+            assert create_resp.status_code == 201
+
             dangerous_filenames = [
                 "../../../etc/passwd.wav",
                 "..\\..\\windows\\system32\\test.wav",
                 "file<script>.wav",
                 "file|pipe.wav",
-                "file;command.wav"
+                # Note: ';' is deliberately not included here -- it's a
+                # legal character on both POSIX and Windows filesystems and
+                # this codebase never passes filenames to a shell, so there
+                # is no traversal or injection risk to reject it for.
             ]
-            
+
             for filename in dangerous_filenames:
-                files = {"file": (filename, b"fake audio content", "audio/wav")}
-                response = await client.post("/upload/audio", files=files)
-                
-                # Should handle dangerous filenames safely - may accept with sanitization or reject
-                assert response.status_code in [200, 400, 405, 422], f"Should handle dangerous filename safely: {filename} (got {response.status_code})"
-                
-                if response.status_code == 200:
-                    try:
-                        response_data = response.json()
-                        # If successful, check that filename was sanitized (if returned)
-                        if 'filename' in response_data:
-                            stored_filename = response_data['filename']
-                            # Validate that dangerous characters are handled
-                            assert stored_filename is not None, "Filename should be processed"
-                    except (ValueError, KeyError):
-                        # Response may not be JSON, that's okay for this test
-                        pass
+                files = {"files": (filename, b"fake audio content", "audio/wav")}
+                response = await client.post("/upload/dataset/NameCheck/files", files=files)
+                assert response.status_code == 400, f"Should reject dangerous filename: {filename} (got {response.status_code})"
+
+            metadata_resp = await client.get("/upload/dataset/NameCheck/metadata")
+            assert metadata_resp.json()["total_files"] == 0
+
+
+class TestCustomDatasetAccessControl:
+    """Strict, route-level tests for the custom-dataset IDOR fix: a request
+    from one session must never be able to read, list, or stream another
+    session's custom dataset via the generic `/{dataset}/...` routes or the
+    dataset-manager's own `/upload/dataset/...` routes."""
+
+    @pytest.mark.asyncio
+    async def test_owner_can_create_upload_and_read_own_dataset(self):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            create_resp = await client.post("/upload/dataset/create", data={"dataset_name": "Mine"})
+            assert create_resp.status_code == 201
+            dataset_id = create_resp.json()["dataset_name"]
+
+            upload_resp = await client.post(
+                "/upload/dataset/Mine/files",
+                files={"files": ("clip.wav", b"fake audio content", "audio/wav")},
+            )
+            assert upload_resp.status_code == 200
+            assert upload_resp.json()["total_files"] == 1
+
+            meta_resp = await client.get(f"/{dataset_id}/metadata")
+            assert meta_resp.status_code == 200
+            assert len(meta_resp.json()) == 1
+
+            file_resp = await client.get(f"/{dataset_id}/file/clip.wav")
+            assert file_resp.status_code == 200
+            assert file_resp.content == b"fake audio content"
+
+    @pytest.mark.asyncio
+    async def test_cross_session_cannot_read_metadata_or_audio(self):
+        async with AsyncClient(app=app, base_url="http://test") as owner:
+            create_resp = await owner.post("/upload/dataset/create", data={"dataset_name": "Private"})
+            assert create_resp.status_code == 201
+            dataset_id = create_resp.json()["dataset_name"]
+            await owner.post(
+                "/upload/dataset/Private/files",
+                files={"files": ("secret.wav", b"private audio", "audio/wav")},
+            )
+
+        # A separate client has no cookie yet -- the middleware assigns it
+        # its own fresh session, which cannot equal the owner's embedded id.
+        async with AsyncClient(app=app, base_url="http://test") as attacker:
+            meta_resp = await attacker.get(f"/{dataset_id}/metadata")
+            assert meta_resp.status_code == 404
+
+            file_resp = await attacker.get(f"/{dataset_id}/file/secret.wav")
+            assert file_resp.status_code == 404
+            assert file_resp.content != b"private audio"
+
+    @pytest.mark.asyncio
+    async def test_cross_session_cannot_use_own_dataset_manager_routes_on_others_dataset(self):
+        """The session-scoped `/upload/dataset/...` routes derive the
+        session purely from the caller's own cookie (never from the URL),
+        so a raw dataset name collision cannot cross sessions either."""
+        async with AsyncClient(app=app, base_url="http://test") as owner:
+            create_resp = await owner.post("/upload/dataset/create", data={"dataset_name": "Shared"})
+            assert create_resp.status_code == 201
+            await owner.post(
+                "/upload/dataset/Shared/files",
+                files={"files": ("owner_clip.wav", b"owner audio", "audio/wav")},
+            )
+
+        async with AsyncClient(app=app, base_url="http://test") as other:
+            # A same-named dataset created by a different session is a
+            # distinct dataset -- it must start out empty.
+            create_resp = await other.post("/upload/dataset/create", data={"dataset_name": "Shared"})
+            assert create_resp.status_code == 201
+            list_resp = await other.get("/upload/dataset/Shared/metadata")
+            assert list_resp.json()["total_files"] == 0
+
+    @pytest.mark.asyncio
+    async def test_malformed_session_cookie_cannot_access_custom_dataset(self):
+        async with AsyncClient(app=app, base_url="http://test") as owner:
+            create_resp = await owner.post("/upload/dataset/create", data={"dataset_name": "D1"})
+            assert create_resp.status_code == 201
+            dataset_id = create_resp.json()["dataset_name"]
+
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            client.cookies.set("sid", "not-a-real-session-id")
+            resp = await client.get(f"/{dataset_id}/metadata")
+            assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_range_request_still_streams_owned_audio(self):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            create_resp = await client.post("/upload/dataset/create", data={"dataset_name": "RangeCheck"})
+            dataset_id = create_resp.json()["dataset_name"]
+            await client.post(
+                "/upload/dataset/RangeCheck/files",
+                files={"files": ("clip.wav", b"A" * 100, "audio/wav")},
+            )
+
+            resp = await client.get(f"/{dataset_id}/file/clip.wav", headers={"Range": "bytes=0-9"})
+            assert resp.status_code == 206
+            assert resp.content == b"A" * 10
+
+    @pytest.mark.asyncio
+    async def test_builtin_dataset_unaffected_by_custom_dataset_hardening(self):
+        async with AsyncClient(app=app, base_url="http://test") as client:
+            resp = await client.get("/common-voice/metadata")
+            assert resp.status_code == 200
+            assert isinstance(resp.json(), list)
+            assert len(resp.json()) > 0
 
 
 class TestSessionSecurity:

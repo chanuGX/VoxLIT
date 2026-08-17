@@ -16,11 +16,17 @@ logger = logging.getLogger(__name__)
 
 
 def get_session_id(request: Request) -> str:
-    """Extract session ID from request (optional for backwards compatibility)"""
-    session_id = getattr(request.state, 'sid', None)
-    logger.info(f"get_session_id: extracted session_id='{session_id}' from request.state")
-    logger.info(f"get_session_id: request.cookies = {dict(request.cookies)}")
-    return session_id
+    """Return the caller's canonical session id.
+
+    `SessionMiddleware` (app/core/session.py) runs on every request and
+    always populates `request.state.sid` -- minting a fresh id via
+    `ensure_session()` if the caller had no cookie -- so this is never
+    `None` in practice. Built-in (non-custom) datasets don't require a
+    session at all, so this value is simply ignored for them; custom
+    datasets validate and use it in `dataset_service.load_metadata()` /
+    `resolve_file()`.
+    """
+    return request.state.sid
 
 
 @router.get("/{dataset}/metadata")
