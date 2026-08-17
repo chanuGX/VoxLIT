@@ -6,9 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useEmbedding } from "@/contexts/EmbeddingContext";
 import { VERIFICATION_DEMO_DATASET_ID } from "@/tasks/registry";
+import type { UploadedFile } from "@/tasks/types";
 import { ClusterSummaryList } from "./ClusterSummaryList";
 import { PairComparisonCard } from "./PairComparisonCard";
 import { buildClusterColorMap } from "./clusterColors";
+import { SpeakerSaliencyMap } from "./SpeakerSaliencyMap";
+import { verificationAudioUrl } from "./audioUrl";
+import type { SaliencyMapResponse } from "./saliencyTypes";
 import type {
   BatchAnalysisResponse,
   BatchProjectionRequestBody,
@@ -24,9 +28,15 @@ interface BatchAnalysisPanelProps {
   uploadedRawFiles: Record<string, File>;
   selectedBatchIds: string[];
   pairSelection: string[];
+  /** Currently selected recording (table row click or graph point click) --
+   *  drives cluster-based saliency for whichever recording is selected. */
+  selectedFile: UploadedFile | null;
   onReprojectHandlerChange: (handler: ((method: string, n: number) => void) | null) => void;
   onLabelResolverChange: (resolver: ((label: string) => string | undefined) | null) => void;
 }
+
+const DEFAULT_SALIENCY_SEGMENT_COUNT = 8;
+const isBackendResolvableId = (id: string) => id.startsWith("rec_") || id.startsWith("asset_");
 
 const MIN_BATCH_SIZE = 2;
 const MAX_BATCH_SIZE = 100;
@@ -41,6 +51,7 @@ export const BatchAnalysisPanel = ({
   uploadedRawFiles,
   selectedBatchIds,
   pairSelection,
+  selectedFile,
   onReprojectHandlerChange,
   onLabelResolverChange,
 }: BatchAnalysisPanelProps) => {
@@ -54,6 +65,14 @@ export const BatchAnalysisPanel = ({
   // Snapshot of selectedBatchIds at the moment Run was clicked — batchResult.labels
   // are index-aligned to this, not to the (possibly since-changed) live prop.
   const [submittedIds, setSubmittedIds] = useState<string[]>([]);
+
+  // Cluster-based saliency (Mode 1) -- see SpeakerSaliencyMap.
+  const [saliencyResult, setSaliencyResult] = useState<SaliencyMapResponse | null>(null);
+  const [saliencyError, setSaliencyError] = useState<string | null>(null);
+  const [isSaliencyLoading, setIsSaliencyLoading] = useState(false);
+  const [saliencySegmentCount, setSaliencySegmentCount] = useState(DEFAULT_SALIENCY_SEGMENT_COUNT);
+  const saliencyAbortRef = useRef<AbortController | null>(null);
+  const isFirstSegmentCountRender = useRef(true);
 
   const batchAbortRef = useRef<AbortController | null>(null);
   const projectionAbortRef = useRef<AbortController | null>(null);
@@ -76,6 +95,8 @@ export const BatchAnalysisPanel = ({
   // Any change to model, dataset, or the checked batch selection invalidates
   // the current result — abort in-flight requests and clear everything
   // (including the published graph data) so a stale result never lingers.
+  // A replaced/cleared batchResult also invalidates cluster-based saliency,
+  // since cluster membership was only ever derived from that result.
   useEffect(() => {
     if (batchAbortRef.current) {
       batchAbortRef.current.abort();
@@ -85,13 +106,43 @@ export const BatchAnalysisPanel = ({
       projectionAbortRef.current.abort();
       projectionAbortRef.current = null;
     }
+    if (saliencyAbortRef.current) {
+      saliencyAbortRef.current.abort();
+      saliencyAbortRef.current = null;
+    }
     setBatchResult(null);
     setBatchError(null);
     setProjectionError(null);
     setSubmittedIds([]);
     setEmbeddingDataDirect(null);
+    setSaliencyResult(null);
+    setSaliencyError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, dataset, selectedBatchIds]);
+
+  // Selecting a different recording invalidates any prior saliency map (it
+  // explained a different target) -- never touches selectedBatchIds, graph
+  // selection, or camera state.
+  useEffect(() => {
+    if (saliencyAbortRef.current) {
+      saliencyAbortRef.current.abort();
+      saliencyAbortRef.current = null;
+    }
+    setSaliencyResult(null);
+    setSaliencyError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFile?.file_id]);
+
+  // Changing the segment-count control invalidates a displayed map, since it
+  // no longer reflects the currently selected segment count.
+  useEffect(() => {
+    if (isFirstSegmentCountRender.current) {
+      isFirstSegmentCountRender.current = false;
+      return;
+    }
+    setSaliencyResult(null);
+    setSaliencyError(null);
+  }, [saliencySegmentCount]);
 
   const runBatch = async () => {
     if (!canRun) return;
@@ -260,6 +311,76 @@ export const BatchAnalysisPanel = ({
   const labelToIndex = new Map((batchResult?.labels ?? []).map((label, i) => [label, i]));
   const clusterColorMap = batchResult ? buildClusterColorMap(batchResult.cluster_labels) : {};
 
+  // Cluster membership, resolved entirely client-side from the last batch
+  // result -- the backend never stores or looks up cluster assignments.
+  // Explicit `!== null && !== undefined` checks throughout: a cluster label
+  // is an opaque string ("cluster-1", ...), but the lookup itself must never
+  // treat "not found" the same as a falsy-but-valid label via truthiness.
+  const targetIndex =
+    selectedFile && batchResult ? submittedIds.indexOf(selectedFile.file_id) : -1;
+  const targetClusterId: string | null =
+    targetIndex >= 0 ? batchResult!.cluster_labels[targetIndex] : null;
+  const hasTargetCluster = targetClusterId !== null && targetClusterId !== undefined;
+  const clusterMemberIds = hasTargetCluster
+    ? submittedIds.filter((_, i) => i !== targetIndex && batchResult!.cluster_labels[i] === targetClusterId)
+    : [];
+  const isSingletonCluster = hasTargetCluster && clusterMemberIds.length === 0;
+  // Only demo (`rec_...`) and registered session-asset (`asset_...`) ids are
+  // backend-resolvable -- a raw batch-upload id (client-only, never
+  // registered via session-assets/upload) is not, and would 404.
+  const isTargetIdResolvable = !!selectedFile && isBackendResolvableId(selectedFile.file_id);
+
+  const saliencyEmptyStateMessage = !hasTargetCluster
+    ? null
+    : !isTargetIdResolvable
+      ? "Cluster saliency needs recordings uploaded via the Speaker Verification upload button, not a raw batch upload."
+      : isSingletonCluster
+        ? "This recording's predicted cluster has no other members — cluster-based saliency requires at least one other recording in the same cluster."
+        : null;
+
+  const runClusterSaliency = async () => {
+    if (!selectedFile || !hasTargetCluster || !targetClusterId || isSingletonCluster || !isTargetIdResolvable) return;
+    if (saliencyAbortRef.current) {
+      saliencyAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    saliencyAbortRef.current = controller;
+
+    const formData = new FormData();
+    formData.append("model", model);
+    formData.append("reference_type", "cluster");
+    clusterMemberIds.forEach((id) => formData.append("reference_recording_ids", id));
+    formData.append("target_recording_id", selectedFile.file_id);
+    formData.append("cluster_id", targetClusterId);
+    formData.append("segment_count", String(saliencySegmentCount));
+
+    setIsSaliencyLoading(true);
+    setSaliencyError(null);
+    setSaliencyResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE}/tasks/verification/explain/saliency`, {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+        signal: controller.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || `Saliency map failed (${response.status}).`);
+      }
+      setSaliencyResult(payload as SaliencyMapResponse);
+    } catch (caught) {
+      if (isAbortError(caught)) return;
+      setSaliencyError(caught instanceof Error ? caught.message : "Saliency map failed.");
+    } finally {
+      setIsSaliencyLoading(false);
+      if (saliencyAbortRef.current === controller) {
+        saliencyAbortRef.current = null;
+      }
+    }
+  };
+
   const selectionSummary =
     inputMode === "upload"
       ? `${selectedBatchIds.length} uploaded recording${selectedBatchIds.length === 1 ? "" : "s"} selected`
@@ -303,6 +424,26 @@ export const BatchAnalysisPanel = ({
           <PairComparisonCard selectedLabels={pairSelection} batchResult={batchResult} labelToIndex={labelToIndex} />
           <ClusterSummaryList clusterSummaries={batchResult.cluster_summaries} clusterColorMap={clusterColorMap} />
         </>
+      )}
+
+      {batchResult && selectedFile && hasTargetCluster && (
+        <SpeakerSaliencyMap
+          title={`Cluster saliency — ${selectedFile.filename}`}
+          audioUrl={isTargetIdResolvable ? verificationAudioUrl(selectedFile.file_id) : undefined}
+          requireCredentials={true}
+          result={saliencyResult}
+          isLoading={isSaliencyLoading}
+          error={saliencyError}
+          staleReason={null}
+          emptyStateMessage={saliencyEmptyStateMessage}
+          onGenerate={saliencyEmptyStateMessage ? null : runClusterSaliency}
+          generateLabel="Generate saliency map"
+          segmentCount={saliencySegmentCount}
+          onSegmentCountChange={setSaliencySegmentCount}
+          clusterBadge={
+            targetClusterId ? { label: targetClusterId, color: clusterColorMap[targetClusterId] ?? "#3b82f6" } : null
+          }
+        />
       )}
     </div>
   );

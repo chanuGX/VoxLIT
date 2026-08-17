@@ -11,6 +11,7 @@ import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
 import { UploadedFile, DatasetRecordingRef } from '@/tasks/types';
 import { isVerificationDemoDataset } from '@/tasks/registry';
+import { verificationAudioUrl } from '@/features/verification/audioUrl';
 
 interface PerturbationResult {
   perturbed_file: string;
@@ -81,12 +82,7 @@ export const DatapointEditorPanel = ({
     // loaded recording list yet.
     if (isDemoDatasetPlayback) {
       if (!demoRecording) return undefined;
-      // Session-scoped assets (uploads + perturbation outputs) stream through
-      // a different route than demo recordings — distinguished by id prefix.
-      const isSessionAsset = demoRecording.recording_id.startsWith('asset_');
-      return isSessionAsset
-        ? `${API_BASE}/tasks/verification/session-assets/${encodeURIComponent(demoRecording.recording_id)}/audio`
-        : `${API_BASE}/tasks/verification/dataset/recordings/${encodeURIComponent(demoRecording.recording_id)}/audio`;
+      return verificationAudioUrl(demoRecording.recording_id);
     }
 
     // If showing perturbed audio and it's available

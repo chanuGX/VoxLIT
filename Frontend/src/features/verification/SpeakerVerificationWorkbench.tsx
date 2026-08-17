@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, FileAudio, Users, XCircle } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -8,8 +8,24 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BatchAnalysisPanel } from "./BatchAnalysisPanel";
+import { SpeakerSaliencyMap } from "./SpeakerSaliencyMap";
+import { verificationAudioUrl } from "./audioUrl";
+import type { SaliencyMapResponse } from "./saliencyTypes";
 import { PerturbationTools, type VerificationPerturbationContext } from "@/components/analysis/PerturbationTools";
 import type { WorkbenchCenterProps } from "@/tasks/types";
+
+const DEFAULT_SALIENCY_SEGMENT_COUNT = 8;
+
+interface EnrollmentSaliencyKey {
+  model: string;
+  enrollmentKey: string;
+  probeId: string;
+}
+
+function enrollmentKeysEqual(a: EnrollmentSaliencyKey | null, b: EnrollmentSaliencyKey | null): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  return a.model === b.model && a.enrollmentKey === b.enrollmentKey && a.probeId === b.probeId;
+}
 
 type SpeakerVerificationWorkbenchProps = WorkbenchCenterProps;
 
@@ -73,10 +89,25 @@ export const SpeakerVerificationWorkbench = ({
   const [enrollmentFiles, setEnrollmentFiles] = useState<File[]>([]);
   const [probeFile, setProbeFile] = useState<File | null>(null);
   const [result, setResult] = useState<VerificationResult | null>(null);
+  // Which flow produced `result` -- distinguishes the raw-upload occlusion
+  // card (below, unchanged) from the id-mode ("workspace selections")
+  // saliency section, so the two never both render for the same result.
+  const [resultMode, setResultMode] = useState<"upload" | "id" | null>(null);
   const [occlusion, setOcclusion] = useState<OcclusionResult | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [isExplaining, setIsExplaining] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Enrollment-based saliency (Mode 2, id-mode only) -- see SpeakerSaliencyMap.
+  const [saliencyResult, setSaliencyResult] = useState<SaliencyMapResponse | null>(null);
+  const [saliencyError, setSaliencyError] = useState<string | null>(null);
+  const [isSaliencyLoading, setIsSaliencyLoading] = useState(false);
+  const [saliencySegmentCount, setSaliencySegmentCount] = useState(DEFAULT_SALIENCY_SEGMENT_COUNT);
+  const [resultGeneratedFor, setResultGeneratedFor] = useState<EnrollmentSaliencyKey | null>(null);
+  const [saliencyGeneratedFor, setSaliencyGeneratedFor] = useState<
+    (EnrollmentSaliencyKey & { segmentCount: number }) | null
+  >(null);
+  const saliencyAbortRef = useRef<AbortController | null>(null);
 
   // Resolve an opaque recording_id (rec_... or asset_...) to a display label
   // via the merged demo+session-asset list, falling back to the id itself.
@@ -101,6 +132,17 @@ export const SpeakerVerificationWorkbench = ({
           ? "The probe recording must not also be a checked enrollment recording."
           : null;
   const canRunIdMode = !idModeValidationMessage && !!model;
+  const idModeEnrollmentKey = [...idModeEnrollmentIds].sort().join(",");
+  const currentEnrollmentKey: EnrollmentSaliencyKey | null =
+    idModeProbeId !== null && idModeProbeId !== undefined && idModeEnrollmentIds.length >= 3 && idModeEnrollmentIds.length <= 5
+      ? { model, enrollmentKey: idModeEnrollmentKey, probeId: idModeProbeId }
+      : null;
+  const isResultCurrent =
+    result !== null && resultMode === "id" && enrollmentKeysEqual(resultGeneratedFor, currentEnrollmentKey);
+  const isSaliencyStale =
+    saliencyResult !== null &&
+    (!enrollmentKeysEqual(saliencyGeneratedFor, currentEnrollmentKey) ||
+      saliencyGeneratedFor?.segmentCount !== saliencySegmentCount);
 
   const runVerificationById = async () => {
     if (!canRunIdMode || !idModeProbeId) return;
@@ -113,6 +155,7 @@ export const SpeakerVerificationWorkbench = ({
     setIsRunning(true);
     setError(null);
     setResult(null);
+    setResultMode(null);
 
     try {
       const response = await fetch(`${API_BASE}/tasks/verification/verify`, {
@@ -125,6 +168,8 @@ export const SpeakerVerificationWorkbench = ({
         throw new Error(payload.detail || `Verification failed (${response.status})`);
       }
       setResult(payload as VerificationResult);
+      setResultMode("id");
+      setResultGeneratedFor({ model, enrollmentKey: idModeEnrollmentKey, probeId: idModeProbeId });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Speaker verification failed.");
     } finally {
@@ -132,33 +177,51 @@ export const SpeakerVerificationWorkbench = ({
     }
   };
 
-  const runTemporalOcclusionById = async () => {
-    if (!canRunIdMode || !idModeProbeId) return;
+  const runEnrollmentSaliency = async () => {
+    if (!isResultCurrent || !idModeProbeId) return;
+    if (saliencyAbortRef.current) {
+      saliencyAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    saliencyAbortRef.current = controller;
 
     const formData = new FormData();
     formData.append("model", model);
-    formData.append("segment_count", "8");
+    formData.append("reference_type", "enrollment");
     idModeEnrollmentIds.forEach((id) => formData.append("enrollment_recording_ids", id));
     formData.append("probe_recording_id", idModeProbeId);
+    formData.append("segment_count", String(saliencySegmentCount));
 
-    setIsExplaining(true);
-    setOcclusion(null);
-    setError(null);
+    setIsSaliencyLoading(true);
+    setSaliencyError(null);
+    setSaliencyResult(null);
+
     try {
-      const response = await fetch(`${API_BASE}/tasks/verification/explain/temporal-occlusion`, {
+      const response = await fetch(`${API_BASE}/tasks/verification/explain/saliency`, {
         method: "POST",
         credentials: "include",
         body: formData,
+        signal: controller.signal,
       });
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(payload.detail || `Temporal occlusion failed (${response.status})`);
+        throw new Error(payload.detail || `Saliency map failed (${response.status}).`);
       }
-      setOcclusion(payload as OcclusionResult);
+      setSaliencyResult(payload as SaliencyMapResponse);
+      setSaliencyGeneratedFor({
+        model,
+        enrollmentKey: idModeEnrollmentKey,
+        probeId: idModeProbeId,
+        segmentCount: saliencySegmentCount,
+      });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Temporal occlusion failed.");
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      setSaliencyError(caught instanceof Error ? caught.message : "Saliency map failed.");
     } finally {
-      setIsExplaining(false);
+      setIsSaliencyLoading(false);
+      if (saliencyAbortRef.current === controller) {
+        saliencyAbortRef.current = null;
+      }
     }
   };
 
@@ -173,8 +236,13 @@ export const SpeakerVerificationWorkbench = ({
 
   useEffect(() => {
     setResult(null);
+    setResultMode(null);
+    setResultGeneratedFor(null);
     setOcclusion(null);
     setError(null);
+    setSaliencyResult(null);
+    setSaliencyError(null);
+    setSaliencyGeneratedFor(null);
   }, [model]);
 
   const canRun = enrollmentFiles.length >= 3 && enrollmentFiles.length <= 5 && !!probeFile && !!model;
@@ -221,6 +289,7 @@ export const SpeakerVerificationWorkbench = ({
         throw new Error(payload.detail || `Verification failed (${response.status})`);
       }
       setResult(payload as VerificationResult);
+      setResultMode("upload");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Speaker verification failed.");
     } finally {
@@ -356,14 +425,6 @@ export const SpeakerVerificationWorkbench = ({
               <Button className="flex-1" disabled={!canRunIdMode || isRunning} onClick={runVerificationById}>
                 {isRunning ? "Extracting embeddings…" : "Verify speaker (selections)"}
               </Button>
-              <Button
-                variant="outline"
-                className="flex-1"
-                disabled={!canRunIdMode || isExplaining}
-                onClick={runTemporalOcclusionById}
-              >
-                {isExplaining ? "Running 8 occlusion passes…" : "Run temporal occlusion (selections)"}
-              </Button>
             </div>
             {idModeValidationMessage && (
               <p className="text-xs text-muted-foreground">{idModeValidationMessage}</p>
@@ -432,45 +493,70 @@ export const SpeakerVerificationWorkbench = ({
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Temporal occlusion saliency</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-xs text-muted-foreground">
-                  Mute eight probe segments one at a time and measure the change in cluster similarity.
-                </p>
-                <Button variant="outline" onClick={runTemporalOcclusion} disabled={isExplaining}>
-                  {isExplaining ? "Running 8 occlusion passes…" : "Run temporal occlusion"}
-                </Button>
-                {occlusion && (
-                  <div className="space-y-2 border-t pt-3">
-                    {occlusion.segments.map((segment) => {
-                      const maxImportance = Math.max(
-                        ...occlusion.segments.map((item) => Math.abs(item.importance)),
-                        0.0001
-                      );
-                      const width = Math.max(2, (Math.abs(segment.importance) / maxImportance) * 100);
-                      return (
-                        <div key={segment.segment_index} className="grid grid-cols-[7rem_1fr_4.5rem] items-center gap-2 text-xs">
-                          <span>{segment.start_seconds.toFixed(2)}–{segment.end_seconds.toFixed(2)}s</span>
-                          <div className="h-3 rounded bg-muted">
-                            <div
-                              className={`h-3 rounded ${segment.importance >= 0 ? "bg-emerald-500" : "bg-rose-500"}`}
-                              style={{ width: `${width}%` }}
-                            />
+            {resultMode === "upload" && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">Temporal occlusion saliency</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    Mute eight probe segments one at a time and measure the change in cluster similarity.
+                  </p>
+                  <Button variant="outline" onClick={runTemporalOcclusion} disabled={isExplaining}>
+                    {isExplaining ? "Running 8 occlusion passes…" : "Run temporal occlusion"}
+                  </Button>
+                  {occlusion && (
+                    <div className="space-y-2 border-t pt-3">
+                      {occlusion.segments.map((segment) => {
+                        const maxImportance = Math.max(
+                          ...occlusion.segments.map((item) => Math.abs(item.importance)),
+                          0.0001
+                        );
+                        const width = Math.max(2, (Math.abs(segment.importance) / maxImportance) * 100);
+                        return (
+                          <div key={segment.segment_index} className="grid grid-cols-[7rem_1fr_4.5rem] items-center gap-2 text-xs">
+                            <span>{segment.start_seconds.toFixed(2)}–{segment.end_seconds.toFixed(2)}s</span>
+                            <div className="h-3 rounded bg-muted">
+                              <div
+                                className={`h-3 rounded ${segment.importance >= 0 ? "bg-emerald-500" : "bg-rose-500"}`}
+                                style={{ width: `${width}%` }}
+                              />
+                            </div>
+                            <span className="text-right font-mono">
+                              {segment.importance >= 0 ? "+" : ""}{segment.importance.toFixed(4)}
+                            </span>
                           </div>
-                          <span className="text-right font-mono">
-                            {segment.importance >= 0 ? "+" : ""}{segment.importance.toFixed(4)}
-                          </span>
-                        </div>
-                      );
-                    })}
-                    <p className="pt-1 text-xs text-muted-foreground">{occlusion.interpretation}</p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+                        );
+                      })}
+                      <p className="pt-1 text-xs text-muted-foreground">{occlusion.interpretation}</p>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {resultMode === "id" && (
+              <SpeakerSaliencyMap
+                title="Temporal occlusion saliency"
+                audioUrl={idModeProbeId ? verificationAudioUrl(idModeProbeId) : undefined}
+                requireCredentials={true}
+                result={saliencyResult}
+                isLoading={isSaliencyLoading}
+                error={saliencyError}
+                staleReason={
+                  !isResultCurrent
+                    ? "Selections have changed since this verification result was produced — run verification again to enable a saliency map."
+                    : isSaliencyStale
+                      ? "Model, enrollment, or probe selection changed since this map was generated."
+                      : null
+                }
+                emptyStateMessage={null}
+                onGenerate={isResultCurrent ? runEnrollmentSaliency : null}
+                generateLabel="Generate saliency map"
+                segmentCount={saliencySegmentCount}
+                onSegmentCountChange={setSaliencySegmentCount}
+              />
+            )}
           </div>
         )}
           </TabsContent>
@@ -484,6 +570,7 @@ export const SpeakerVerificationWorkbench = ({
               uploadedRawFiles={uploadedRawFiles}
               selectedBatchIds={selectedBatchIds}
               pairSelection={pairSelection}
+              selectedFile={selectedFile}
               onReprojectHandlerChange={onReprojectHandlerChange}
               onLabelResolverChange={onLabelResolverChange}
             />

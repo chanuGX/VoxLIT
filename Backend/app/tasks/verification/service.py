@@ -504,33 +504,30 @@ def rehydrate_cached_embedding(
     return F.normalize(tensor, p=2, dim=0)
 
 
-def temporal_occlusion_saliency(
-    model_key: str,
-    enrollment_paths: Sequence[str | Path],
-    probe_path: str | Path,
-    segment_count: int = 8,
-) -> dict[str, object]:
-    """Measure score change after muting each temporal region of the probe."""
+def _occlude_and_score(
+    adapter: SpeakerEmbeddingAdapter,
+    centroid: torch.Tensor,
+    target_path: str | Path,
+    segment_count: int,
+) -> tuple[float, float, list[dict[str, float | int]]]:
+    """Mute each temporal region of target_path once, scoring against a fixed
+    centroid. Returns (baseline_similarity, audio_duration_seconds, segments).
 
-    if not 3 <= len(enrollment_paths) <= 5:
-        raise ValueError("Speaker enrolment requires between 3 and 5 reference recordings.")
-    if not 4 <= segment_count <= 20:
-        raise ValueError("Temporal occlusion requires between 4 and 20 segments.")
+    No reference-count or segment-count constraints here -- callers own those
+    (they differ between the 3-5-enrollment pair-verification path and the
+    unbounded-membership cluster path)."""
 
-    spec = get_model_spec(model_key)
-    adapter = get_model(model_key)
-    enrollment_embeddings = [adapter.extract_embedding(path) for path in enrollment_paths]
-    centroid = F.normalize(torch.stack(enrollment_embeddings).mean(dim=0), p=2, dim=0)
-    baseline_embedding = adapter.extract_embedding(probe_path)
+    baseline_embedding = adapter.extract_embedding(target_path)
     baseline_similarity = _cosine(centroid, baseline_embedding)
 
-    waveform, sample_rate = torchaudio.load(str(probe_path))
+    waveform, sample_rate = torchaudio.load(str(target_path))
     if waveform.numel() == 0:
-        raise ValueError("Probe audio is empty.")
+        raise ValueError("Target audio is empty.")
     if waveform.shape[0] > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
 
     total_samples = waveform.shape[1]
+    audio_duration_seconds = total_samples / sample_rate
     boundaries = np.linspace(0, total_samples, segment_count + 1, dtype=int)
     segments: list[dict[str, float | int]] = []
 
@@ -545,15 +542,56 @@ def temporal_occlusion_saliency(
 
             occluded_embedding = adapter.extract_embedding(occluded_path)
             occluded_similarity = _cosine(centroid, occluded_embedding)
+            similarity_change = baseline_similarity - occluded_similarity
             segments.append(
                 {
                     "segment_index": index + 1,
                     "start_seconds": start_sample / sample_rate,
                     "end_seconds": end_sample / sample_rate,
                     "occluded_similarity": occluded_similarity,
-                    "importance": baseline_similarity - occluded_similarity,
+                    "similarity_change": similarity_change,
+                    "influence_strength": abs(similarity_change),
                 }
             )
+
+    return baseline_similarity, audio_duration_seconds, segments
+
+
+def temporal_occlusion_saliency(
+    model_key: str,
+    enrollment_paths: Sequence[str | Path],
+    probe_path: str | Path,
+    segment_count: int = 8,
+) -> dict[str, object]:
+    """Measure score change after muting each temporal region of the probe.
+
+    Public response shape is unchanged from before the `_occlude_and_score`
+    refactor -- this wrapper still owns the 3-5-enrollment validation and
+    maps each segment back to the original `importance`-only shape."""
+
+    if not 3 <= len(enrollment_paths) <= 5:
+        raise ValueError("Speaker enrolment requires between 3 and 5 reference recordings.")
+    if not 4 <= segment_count <= 20:
+        raise ValueError("Temporal occlusion requires between 4 and 20 segments.")
+
+    spec = get_model_spec(model_key)
+    adapter = get_model(model_key)
+    enrollment_embeddings = [adapter.extract_embedding(path) for path in enrollment_paths]
+    centroid = F.normalize(torch.stack(enrollment_embeddings).mean(dim=0), p=2, dim=0)
+
+    baseline_similarity, _audio_duration_seconds, raw_segments = _occlude_and_score(
+        adapter, centroid, probe_path, segment_count
+    )
+    segments = [
+        {
+            "segment_index": segment["segment_index"],
+            "start_seconds": segment["start_seconds"],
+            "end_seconds": segment["end_seconds"],
+            "occluded_similarity": segment["occluded_similarity"],
+            "importance": segment["similarity_change"],
+        }
+        for segment in raw_segments
+    ]
 
     return {
         "model": spec.key,
@@ -564,6 +602,64 @@ def temporal_occlusion_saliency(
         "interpretation": (
             "Positive importance means the muted segment supported the original "
             "speaker-similarity score; negative importance means it opposed it."
+        ),
+        "segments": segments,
+    }
+
+
+def compute_saliency_map(
+    model_key: str,
+    reference_paths: Sequence[str | Path],
+    target_path: str | Path,
+    *,
+    reference_type: str,
+    cluster_id: str | None = None,
+    target_recording_id: str | None = None,
+    segment_count: int = 8,
+) -> dict[str, object]:
+    """Generalized temporal-occlusion saliency: fixed reference centroid,
+    single target, no reclustering, no upper/lower bound tied to the 3-5
+    pair-verification enrollment rule.
+
+    `reference_type`/`cluster_id`/`target_recording_id` are pure passthrough
+    metadata the caller already knows (this function never derives or
+    validates them against any stored clustering -- there is none). Reference
+    and segment-count bounds are the router's job (they differ between
+    enrollment and cluster mode); this function only rejects an empty
+    reference list and an out-of-range segment count so it stays safe to
+    call directly (e.g. from tests) without going through the router.
+    """
+
+    if not reference_paths:
+        raise ValueError("At least one reference recording is required.")
+    if not 4 <= segment_count <= 20:
+        raise ValueError("Temporal occlusion requires between 4 and 20 segments.")
+
+    spec = get_model_spec(model_key)
+    adapter = get_model(model_key)
+    reference_embeddings = [adapter.extract_embedding(path) for path in reference_paths]
+    centroid = F.normalize(torch.stack(reference_embeddings).mean(dim=0), p=2, dim=0)
+
+    baseline_similarity, audio_duration_seconds, segments = _occlude_and_score(
+        adapter, centroid, target_path, segment_count
+    )
+
+    return {
+        "model": spec.key,
+        "model_label": spec.label,
+        "reference_type": reference_type,
+        "cluster_id": cluster_id,
+        "target_recording_id": target_recording_id,
+        "reference_count": len(reference_paths),
+        "baseline_similarity": baseline_similarity,
+        "threshold": spec.threshold,
+        "segment_count": segment_count,
+        "audio_duration_seconds": audio_duration_seconds,
+        "interpretation": (
+            "Positive similarity_change means the muted segment supported the "
+            "match to the reference centroid; negative similarity_change means "
+            "it opposed it. influence_strength is the absolute value, used for "
+            "ranking segments by influence regardless of direction."
         ),
         "segments": segments,
     }

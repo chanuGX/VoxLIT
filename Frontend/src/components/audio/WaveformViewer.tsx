@@ -18,9 +18,15 @@ interface WaveformViewerProps {
    *  other caller, which keeps their existing (uncredentialed) behavior
    *  byte-for-byte unchanged. */
   requireCredentials?: boolean;
+  /** Content rendered directly below the waveform's own drawing area (same
+   *  Card, same horizontal padding context -- never overlapping it) -- for a
+   *  saliency heatmap or other timeline strip that must share the waveform's
+   *  exact usable width. Omitted by every existing caller, so
+   *  Transcription/Emotion/other WaveformViewer usages are byte-identical. */
+  timelineBelow?: React.ReactNode;
 }
 
-export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFinish, requireCredentials }: WaveformViewerProps) => {
+export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFinish, requireCredentials, timelineBelow }: WaveformViewerProps) => {
   const waveformRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -304,7 +310,9 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFin
           </div>
         )}
       </div>
-      
+
+      {timelineBelow && <div className="mt-2">{timelineBelow}</div>}
+
       {/* Time markers and controls */}
       <div className="flex justify-between text-xs text-gray-600 mt-2">
         <span>0:00</span>
