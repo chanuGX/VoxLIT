@@ -148,6 +148,22 @@ export interface SessionAssetMetadata {
   created_at: number;
 }
 
+/** Speaker-Verification-only: a temporary local device file (Pair
+ *  Verification enrollment/probe upload) shown in the Datapoint Editor.
+ *  Never a real backend id — must never be written into selectedBatchIds,
+ *  workspace enrollment/probe ids, session-asset APIs, or any backend
+ *  request. */
+export interface LocalFilePreview {
+  /** crypto.randomUUID(), assigned once when the file is selected. */
+  localId: string;
+  file: File;
+  /** URL.createObjectURL(file) — created once, revoked on replace/unmount. */
+  previewUrl: string;
+  role: "enrollment" | "probe";
+  /** "Reference 1", "Probe", etc. */
+  label: string;
+}
+
 /**
  * Props every WorkbenchCenter slot component receives. Mirrors the shared
  * selection/upload state TaskWorkbench already threads into AudioDatasetPanel
@@ -192,4 +208,11 @@ export interface WorkbenchCenterProps {
    *  Datapoint Editor. Takes the raw session-asset shape returned by both
    *  the upload endpoint and a perturbation response's `session_asset`. */
   onVerificationAssetCreated: (asset: SessionAssetMetadata) => void;
+  /** Verification-only: the currently active local device-file preview (if
+   *  any) shown in the Datapoint Editor, so this WorkbenchCenter can style
+   *  its own enrollment/probe rows as active when they match it. */
+  localPreview: LocalFilePreview | null;
+  /** Verification-only: sets/clears the active local device-file preview.
+   *  Never affects selectedFile/selectedBatchIds/graph state. */
+  onLocalFileSelect: (preview: LocalFilePreview | null) => void;
 }

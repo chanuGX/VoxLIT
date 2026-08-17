@@ -5,7 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
 import { WaveformViewer } from "@/components/audio/WaveformViewer";
 import type { SaliencyMapResponse, SaliencySegment } from "./saliencyTypes";
 
@@ -16,7 +16,8 @@ import type { SaliencyMapResponse, SaliencySegment } from "./saliencyTypes";
 // from "low" influence on a per-result normalized scale.
 const MIN_DISPLAY_INFLUENCE_DELTA = 0.01;
 
-const SEGMENT_COUNT_OPTIONS = [4, 6, 8, 10, 12, 16, 20];
+const SEGMENT_COUNT_MIN = 4;
+const SEGMENT_COUNT_MAX = 20;
 
 function intensityToColor(v: number): string {
   const clamp = (x: number) => Math.max(0, Math.min(1, x));
@@ -219,26 +220,20 @@ export const SpeakerSaliencyMap = ({
           <p className="text-xs text-muted-foreground">{emptyStateMessage}</p>
         ) : (
           <>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                Segments
-                <Select
-                  value={String(segmentCount)}
-                  onValueChange={(value) => onSegmentCountChange(Number(value))}
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex min-w-[10rem] flex-1 items-center gap-2 text-xs text-muted-foreground">
+                <span className="whitespace-nowrap">Segments: {segmentCount}</span>
+                <Slider
+                  className="max-w-[10rem]"
+                  min={SEGMENT_COUNT_MIN}
+                  max={SEGMENT_COUNT_MAX}
+                  step={1}
+                  value={[segmentCount]}
+                  onValueChange={([value]) => onSegmentCountChange(value)}
                   disabled={isLoading}
-                >
-                  <SelectTrigger className="h-7 w-16 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SEGMENT_COUNT_OPTIONS.map((count) => (
-                      <SelectItem key={count} value={String(count)}>
-                        {count}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </label>
+                  thumbLabel={`Segments: ${segmentCount}`}
+                />
+              </div>
               <Button size="sm" variant="outline" onClick={() => onGenerate?.()} disabled={!onGenerate || isLoading}>
                 {isLoading ? "Running occlusion passes…" : generateLabel}
               </Button>

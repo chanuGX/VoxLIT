@@ -136,7 +136,23 @@ export const WaveformViewer = ({ audioUrl, isPlaying, onReady, onProgress, onFin
 
     setIsLoading(true);
     setError(null);
-    
+
+    // Local blob: URLs (device-file previews) are already-local data, not a
+    // network resource -- skip the accessibility probe below entirely. It
+    // issues a HEAD request, which blob: URLs don't support (browsers throw
+    // ERR_METHOD_NOT_SUPPORTED), so probing would only produce spurious
+    // console errors before falling through to the same direct load anyway.
+    if (audioUrl.startsWith('blob:')) {
+      try {
+        wavesurferRef.current.load(audioUrl);
+      } catch (err: any) {
+        console.error('WaveSurfer load error:', err);
+        setError(`WaveSurfer failed to load: ${err?.message || 'Unknown error'}`);
+        setIsLoading(false);
+      }
+      return;
+    }
+
     // First, test if the URL is accessible with proper credentials for cross-origin
     const fetchOptions: RequestInit = { 
       method: 'HEAD',

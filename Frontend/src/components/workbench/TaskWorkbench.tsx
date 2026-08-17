@@ -15,6 +15,7 @@ import {
   WhisperPrediction,
   DatasetRecordingRef,
   SessionAssetMetadata,
+  LocalFilePreview,
 } from '@/tasks/types';
 import { TASK_SLOTS, getModelLabel, VERIFICATION_DEMO_DATASET_ID } from '@/tasks/registry';
 
@@ -38,6 +39,13 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedEmbeddingFile, setSelectedEmbeddingFile] = useState<string | null>(null);
   const [perturbationResult, setPerturbationResult] = useState<any>(null);
+
+  // Speaker-Verification-only: the currently active local device-file
+  // preview shown in the Datapoint Editor. Any backend-driven selection
+  // (dataset row, graph point, new session asset) clears this so the most
+  // recently clicked item always wins — see handleFileSelection,
+  // handleEmbeddingSelection, handleVerificationAssetCreated below.
+  const [localPreview, setLocalPreview] = useState<LocalFilePreview | null>(null);
 
   // Speaker Verification-only shared state (harmless/unused for every other
   // task, since nothing else ever sets these away from their initial values).
@@ -105,6 +113,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   // it's immediately visible in the table and playable in the Datapoint
   // Editor without a refresh or manual import.
   const handleVerificationAssetCreated = useCallback((asset: SessionAssetMetadata) => {
+    setLocalPreview(null);
     const ref: DatasetRecordingRef = {
       recording_id: asset.asset_id,
       display_filename: asset.display_filename,
@@ -526,12 +535,14 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   };
 
   const handleFileSelection = (file: UploadedFile) => {
+    setLocalPreview(null);
     setSelectedFile(file);
     // Sync embedding selection with audio dataset selection
     setSelectedEmbeddingFile(file.filename);
   };
 
   const handleEmbeddingSelection = (filename: string) => {
+    setLocalPreview(null);
     // Speaker Verification's graph reports backend labels (upload-000,
     // rec_<hash>, ...), never real filenames — translate through the
     // index-aligned resolver BatchAnalysisPanel registered before this ever
@@ -712,6 +723,8 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                       onReprojectHandlerChange={registerReprojectHandler}
                       onLabelResolverChange={registerLabelResolver}
                       onVerificationAssetCreated={handleVerificationAssetCreated}
+                      localPreview={localPreview}
+                      onLocalFileSelect={setLocalPreview}
                     />
                   ) : task.status === "active" ? (
                     <ExplainabilityPanel
@@ -773,6 +786,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 predictionMap={predictionMap}
                 renderPredictionResults={renderPredictionResults}
                 datasetRecordings={verificationRecordings}
+                localPreview={localPreview}
               />
             </Panel>
           </PanelGroup>
