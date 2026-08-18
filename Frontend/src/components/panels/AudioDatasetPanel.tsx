@@ -9,7 +9,7 @@ import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
-import { BUILTIN_DATASET_IDS, isVerificationDemoDataset } from '@/tasks/registry';
+import { BUILTIN_DATASET_IDS, isVerificationDemoDataset, VERIFICATION_CUSTOM_DATASET_PREFIX } from '@/tasks/registry';
 import type { DatasetRecordingRef } from '@/tasks/types';
 
 interface UploadedFile {
@@ -55,6 +55,14 @@ interface AudioDatasetPanelProps {
    *  computed by TaskWorkbench. Replaces this panel's own (always-empty,
    *  for verification) local uploadedFiles-based badge count. */
   verificationUploadedCount?: number;
+  /** Verification-only: bumped when files are uploaded into the currently
+   *  active custom dataset, so this panel re-fetches its recordings without
+   *  `dataset` changing (a same-dataset refresh, not a switch). */
+  refreshToken?: number;
+  /** Verification-only: true while a saved custom-dataset selection is
+   *  still being confirmed on page load -- suppresses a premature "no
+   *  recordings" flash before restoration resolves. */
+  isRestoringDataset?: boolean;
 }
 
 export const AudioDatasetPanel = ({ 
@@ -78,6 +86,8 @@ export const AudioDatasetPanel = ({
   onVerificationRecordingsChange,
   sessionAssets,
   verificationUploadedCount,
+  refreshToken,
+  isRestoringDataset,
 }: AudioDatasetPanelProps) => {
   const [selectedRow, setSelectedRow] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -419,10 +429,81 @@ export const AudioDatasetPanel = ({
     return () => clearTimeout(timeoutId);
   }, [batchInferenceQueue, currentInferenceIndex, datasetMetadata, model, dataset, originalDataset, onBatchInferenceComplete]);
 
+  // Verification-only: tracks which custom dataset identity the table's
+  // rows currently belong to, so the fetch effect below can distinguish a
+  // genuine dataset switch (clear immediately, then fetch) from a
+  // same-dataset refresh (keep current rows/results visible while
+  // fetching, replace atomically on success, never blank the table).
+  const prevVerificationDatasetRef = useRef<string | null>(null);
+
+  const fetchCustomDatasetRecordings = useCallback(
+    async (name: string, signal: AbortSignal, isSameDataset: boolean): Promise<boolean> => {
+      if (!isSameDataset) {
+        // Dataset identity changed -- clear immediately so stale rows never
+        // linger under the new dataset's name.
+        setDatasetMetadata([]);
+        onVerificationRecordingsChange?.([]);
+      }
+      try {
+        const res = await fetch(
+          `${API_BASE}/tasks/verification/dataset/custom/${encodeURIComponent(name)}/recordings`,
+          { signal, credentials: 'include' }
+        );
+        if (!res.ok) {
+          if (res.status === 503) {
+            toast.error('Custom recording registry temporarily unavailable — try again shortly.');
+          } else if (res.status === 404) {
+            toast.error('This dataset no longer exists or is inaccessible.');
+          } else {
+            toast.error('Failed to load recordings for this dataset.');
+          }
+          if (!isSameDataset) {
+            // New-dataset failure: leave the table cleared, never showing
+            // the previous dataset's rows under the new dataset's name.
+            setDatasetMetadata([]);
+            onVerificationRecordingsChange?.([]);
+          }
+          // Same-dataset refresh failure: rows/results from before the
+          // failed refresh are left exactly as they were.
+          return false;
+        }
+        const data = await res.json() as { recordings: DatasetRecordingRef[] };
+        const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds }));
+        // Atomic replace -- rows change via one setState call with the
+        // complete, ready result; never cleared-then-filled here.
+        setDatasetMetadata(rows);
+        onAvailableFilesChange?.(rows.map(r => r.filename));
+        onVerificationRecordingsChange?.(data.recordings);
+        return true;
+      } catch (e) {
+        if ((e as { name?: string } | null)?.name === 'AbortError') return false;
+        console.error(e);
+        toast.error('Failed to load recordings for this dataset.');
+        if (!isSameDataset) {
+          setDatasetMetadata([]);
+          onVerificationRecordingsChange?.([]);
+        }
+        return false;
+      }
+    },
+    [onAvailableFilesChange, onVerificationRecordingsChange]
+  );
+
   // Cleanup on unmount or when dataset changes
   // Reload function to refresh dataset metadata
   const handleReloadDataset = useCallback(async () => {
     const datasetToUse = originalDataset || dataset;
+
+    if (selectionVariant === 'verification' && datasetToUse.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX)) {
+      const name = datasetToUse.slice(VERIFICATION_CUSTOM_DATASET_PREFIX.length);
+      const ac = new AbortController();
+      const ok = await fetchCustomDatasetRecordings(name, ac.signal, true);
+      if (ok) {
+        prevVerificationDatasetRef.current = datasetToUse;
+        toast.success("Dataset reloaded successfully");
+      }
+      return;
+    }
 
     if (isVerificationDemoDataset(datasetToUse)) {
       try {
@@ -473,7 +554,7 @@ export const AudioDatasetPanel = ({
       console.error('Failed to reload dataset:', error);
       toast.error("Failed to reload dataset");
     }
-  }, [dataset, originalDataset, onAvailableFilesChange, onVerificationRecordingsChange]);
+  }, [dataset, originalDataset, selectionVariant, onAvailableFilesChange, onVerificationRecordingsChange, fetchCustomDatasetRecordings]);
 
   useEffect(() => {
     abortControllerRef.current = new AbortController();
@@ -516,6 +597,31 @@ export const AudioDatasetPanel = ({
       return () => ac.abort();
     }
 
+    // Speaker Verification's own custom datasets never go through the
+    // generic /{dataset}/metadata route either -- that route is built for
+    // Transcription/Emotion's row shape (Ground Truth/Predicted/Confidence)
+    // and, for Transcription/Emotion's custom datasets, expects the
+    // session-embedding `custom:{sid}:{name}` string, which Verification
+    // must never send. Verification-safe listing/routing lives entirely
+    // under /tasks/verification/dataset/custom/...
+    if (selectionVariant === 'verification' && datasetToUse.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX)) {
+      const name = datasetToUse.slice(VERIFICATION_CUSTOM_DATASET_PREFIX.length);
+      const isSameDataset = prevVerificationDatasetRef.current === datasetToUse;
+      const ac = new AbortController();
+      (async () => {
+        const ok = await fetchCustomDatasetRecordings(name, ac.signal, isSameDataset);
+        if (ok) prevVerificationDatasetRef.current = datasetToUse;
+      })();
+      return () => ac.abort();
+    }
+    if (selectionVariant === 'verification') {
+      // Switched away from a verification-custom dataset (to the demo, or
+      // this render simply isn't one) -- the next time one becomes active
+      // it must be treated as a fresh switch, not "the same dataset",
+      // even if it happens to be the same name as before.
+      prevVerificationDatasetRef.current = null;
+    }
+
     // Handle both global datasets and custom datasets
     const allowed = BUILTIN_DATASET_IDS;
     const isCustomDataset = datasetToUse.startsWith('custom:');
@@ -554,7 +660,7 @@ export const AudioDatasetPanel = ({
       }
     })();
     return () => ac.abort();
-  }, [originalDataset, dataset, onAvailableFilesChange, onVerificationRecordingsChange]);
+  }, [originalDataset, dataset, selectionVariant, refreshToken, onAvailableFilesChange, onVerificationRecordingsChange, fetchCustomDatasetRecordings]);
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -622,6 +728,10 @@ export const AudioDatasetPanel = ({
     }
   };
 
+  // Verification's own batch analysis is capped at 100 recordings — see
+  // AudioDataTable's header/per-row selection logic, gated on this prop.
+  const maxSelectable = selectionVariant === 'verification' ? 100 : undefined;
+
   return (
     <TooltipProvider>
       <div className="h-full bg-panel-background flex flex-col">
@@ -629,6 +739,11 @@ export const AudioDatasetPanel = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <h3 className="font-semibold text-foreground text-sm">Audio Dataset</h3>
+              {isRestoringDataset && (
+                <Badge variant="outline" className="text-[10px] bg-muted animate-pulse">
+                  Restoring dataset…
+                </Badge>
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <HelpCircle className="h-3 w-3 text-muted-foreground hover:text-primary cursor-help transition-colors" />
@@ -731,6 +846,7 @@ export const AudioDatasetPanel = ({
               selectionVariant={selectionVariant}
               checkedIds={checkedIds}
               onCheckedIdsChange={onCheckedIdsChange}
+              maxSelectable={maxSelectable}
             />
           </CardContent>
         </Card>

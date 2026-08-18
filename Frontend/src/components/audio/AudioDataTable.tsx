@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Play, ChevronLeft, ChevronRight } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
+import { toast } from "sonner";
 
 interface UploadedFile {
   file_id: string;
@@ -55,9 +56,13 @@ interface AudioDataTableProps {
   selectionVariant?: 'default' | 'verification';
   checkedIds?: string[];
   onCheckedIdsChange?: (ids: string[]) => void;
+  /** Verification-only: caps how many rows can be checked at once (Batch
+   *  Analysis supports at most 100 recordings). Undefined for every other
+   *  selectionVariant — behavior there is unchanged. */
+  maxSelectable?: number;
 }
 
-export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, selectionVariant = 'default', checkedIds, onCheckedIdsChange }: AudioDataTableProps) => {
+export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData, model, dataset, datasetMetadata, uploadedFiles, onFilePlay, predictionMap, inferenceStatus, onVisibleRowIdsChange, selectionVariant = 'default', checkedIds, onCheckedIdsChange, maxSelectable }: AudioDataTableProps) => {
   // Branch: dataset mode vs custom uploads
   const hasDatasetMetadata = (datasetMetadata?.length || 0) > 0;
   const hasUploadedFiles = uploadedFiles && uploadedFiles.length > 0;
@@ -229,37 +234,57 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         // pagination/search filter — getRowId (below) already guarantees
         // row.id is the real opaque recording_id/asset_id, never a
         // pagination index, so this never leaks an index into checkedIds.
-        const allIds = table.getCoreRowModel().rows.map((r) => r.id);
-        const selectedCount = allIds.filter((id) => checkedIds?.includes(id)).length;
-        const allSelected = allIds.length > 0 && selectedCount === allIds.length;
-        const someSelected = selectedCount > 0 && !allSelected;
+        const eligibleIds = table.getCoreRowModel().rows.map((r) => r.id);
+        const targetIds = maxSelectable ? eligibleIds.slice(0, maxSelectable) : eligibleIds;
+        const selected = new Set(checkedIds ?? []);
+        const isCapped = !!maxSelectable && eligibleIds.length > maxSelectable;
+        const checked = targetIds.length > 0
+          && selected.size === targetIds.length
+          && targetIds.every((id) => selected.has(id));
+        const indeterminate = !checked && targetIds.some((id) => selected.has(id));
         return (
-          <div onClick={(e) => e.stopPropagation()}>
+          <div onClick={(e) => e.stopPropagation()} className="flex flex-col gap-0.5">
             <Checkbox
-              checked={allSelected ? true : someSelected ? "indeterminate" : false}
-              onCheckedChange={(value) => {
+              checked={checked ? true : indeterminate ? "indeterminate" : false}
+              onCheckedChange={() => {
                 if (!onCheckedIdsChange) return;
-                if (value) {
-                  onCheckedIdsChange(Array.from(new Set([...(checkedIds ?? []), ...allIds])));
-                } else {
-                  onCheckedIdsChange((checkedIds ?? []).filter((id) => !allIds.includes(id)));
-                }
+                // Clicking a fully-checked box (capped or not) clears
+                // everything; clicking unchecked/indeterminate replaces the
+                // selection outright with the first `maxSelectable`
+                // eligible ids in stable core-row order — never merges with
+                // whatever was previously selected, so this can never
+                // accidentally exceed the cap.
+                onCheckedIdsChange(checked ? [] : targetIds);
               }}
             />
+            {isCapped && (
+              <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                Selected {selected.size} of {eligibleIds.length} — Batch Analysis supports up to {maxSelectable}
+              </span>
+            )}
           </div>
         );
       },
       cell: ({ row }) => {
         const rowId = row.id as string;
-        const checked = checkedIds?.includes(rowId) ?? false;
+        const selected = new Set(checkedIds ?? []);
+        const checked = selected.has(rowId);
         return (
           <div onClick={(e) => e.stopPropagation()}>
             <Checkbox
               checked={checked}
               onCheckedChange={(value) => {
                 if (!onCheckedIdsChange) return;
-                const current = checkedIds ?? [];
-                onCheckedIdsChange(value ? [...current, rowId] : current.filter((id) => id !== rowId));
+                if (value) {
+                  if (maxSelectable && selected.size >= maxSelectable) {
+                    toast.error(`Batch Analysis supports up to ${maxSelectable} recordings — deselect one first`);
+                    return;
+                  }
+                  selected.add(rowId);
+                } else {
+                  selected.delete(rowId);
+                }
+                onCheckedIdsChange(Array.from(selected));
               }}
             />
           </div>
@@ -318,7 +343,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
         );
       },
     },
-  ], [checkedIds, onCheckedIdsChange, getFrom]);
+  ], [checkedIds, onCheckedIdsChange, getFrom, maxSelectable]);
 
   const getDatasetRowId = useCallback((row: DatasetRow, fallback: string): string => {
     const v = row["id"] ?? row["path"] ?? row["filepath"] ?? row["file"] ?? row["filename"];

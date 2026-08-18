@@ -10,7 +10,6 @@ import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
 import { UploadedFile, DatasetRecordingRef, LocalFilePreview } from '@/tasks/types';
-import { isVerificationDemoDataset } from '@/tasks/registry';
 import { verificationAudioUrl } from '@/features/verification/audioUrl';
 
 interface PerturbationResult {
@@ -69,16 +68,25 @@ export const DatapointEditorPanel = ({
   const [showPerturbed, setShowPerturbed] = useState(false);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
 
-  // Speaker Verification's demo dataset serves audio only through a
-  // task-specific, opaque-id-only endpoint (ground-truth safety) — never the
-  // generic /{dataset}/file/... route, which would require the real filename.
-  const isDemoDatasetPlayback = isVerificationDemoDataset(originalDataset) || isVerificationDemoDataset(dataset);
+  // Any backend-resolvable Speaker Verification recording (demo `rec_...`,
+  // session-scoped `asset_...`, or owned custom-dataset `crec_...`) serves
+  // audio only through a task-specific, opaque-id-only endpoint — never the
+  // generic /{dataset}/file/... route, which would require the real
+  // filename and, for verification, would leak the session-id-free
+  // `verification-custom:` selector into a URL it was never meant to reach.
+  // Gated on the SELECTED RECORDING'S OWN ID, not on which dataset happens
+  // to be active right now — a session asset or a crec_ recording from a
+  // since-deselected dataset can still be legitimately selected/playing.
+  const isVerificationRecordingId = (id?: string | null): boolean =>
+    !!id && (id.startsWith('rec_') || id.startsWith('asset_') || id.startsWith('crec_'));
+  const isVerificationRecordingSelected = !!selectedFile && isVerificationRecordingId(selectedFile.file_id);
 
   // Resolve the selected opaque recording_id against the safe recording list
-  // already returned by GET /tasks/verification/dataset/recordings — never
-  // fetches anything itself, and never exposes ground truth.
-  const demoRecording = isDemoDatasetPlayback && selectedFile
-    ? datasetRecordings?.find((r) => r.recording_id === selectedFile.file_id) ?? null
+  // already returned by GET /tasks/verification/dataset/recordings (demo) or
+  // GET /tasks/verification/dataset/custom/{name}/recordings (custom) —
+  // never fetches anything itself, and never exposes ground truth.
+  const verificationRecording = isVerificationRecordingSelected
+    ? datasetRecordings?.find((r) => r.recording_id === selectedFile!.file_id) ?? null
     : null;
 
   const audioUrl = (() => {
@@ -89,13 +97,13 @@ export const DatapointEditorPanel = ({
       return localPreview.previewUrl;
     }
 
-    // Demo-dataset recordings: stream by opaque recording_id only, through
-    // the task-specific audio endpoint. Falls through to undefined (safe,
-    // same as "no file selected") if the id hasn't resolved against the
-    // loaded recording list yet.
-    if (isDemoDatasetPlayback) {
-      if (!demoRecording) return undefined;
-      return verificationAudioUrl(demoRecording.recording_id);
+    // Backend-resolvable verification recordings (demo/session-asset/custom)
+    // stream by opaque recording_id only, through the task-specific audio
+    // endpoint — built directly from the id itself, not gated on the
+    // recording list lookup succeeding, so playback never becomes hostage
+    // to `datasetRecordings` having loaded yet in the same render.
+    if (isVerificationRecordingSelected) {
+      return verificationAudioUrl(selectedFile!.file_id);
     }
 
     // If showing perturbed audio and it's available
@@ -171,17 +179,18 @@ export const DatapointEditorPanel = ({
       };
     }
 
-    // Demo-dataset selections: filename/extension/size come from the safe
-    // recording list; duration/sample rate are left undefined here so the
-    // render falls through to audioMetadata, populated once WaveSurfer
-    // decodes the audio loaded from the task-specific audio endpoint.
-    if (demoRecording) {
+    // Verification recording selections (demo/session-asset/custom):
+    // filename/extension/size come from the safe recording list;
+    // duration/sample rate are left undefined here so the render falls
+    // through to audioMetadata, populated once WaveSurfer decodes the audio
+    // loaded from the task-specific audio endpoint.
+    if (verificationRecording) {
       return {
-        filename: demoRecording.display_filename,
+        filename: verificationRecording.display_filename,
         duration: undefined,
         sample_rate: undefined,
-        size: demoRecording.size_bytes,
-        extension: demoRecording.extension,
+        size: verificationRecording.size_bytes,
+        extension: verificationRecording.extension,
       };
     }
 
@@ -322,7 +331,7 @@ export const DatapointEditorPanel = ({
                   ? `${currentFileInfo.duration.toFixed(1)}s`
                   : audioMetadata.duration
                   ? `${audioMetadata.duration.toFixed(1)}s`
-                  : !localPreview && isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
+                  : !localPreview && isVerificationRecordingSelected && !verificationRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             <div className="text-xs-tight">
@@ -332,7 +341,7 @@ export const DatapointEditorPanel = ({
                   ? `${(currentFileInfo.sample_rate / 1000).toFixed(1)}kHz`
                   : audioMetadata.sampleRate
                   ? `${(audioMetadata.sampleRate / 1000).toFixed(1)}kHz`
-                  : !localPreview && isDemoDatasetPlayback && !demoRecording ? "Not available" : "Loading..."}
+                  : !localPreview && isVerificationRecordingSelected && !verificationRecording ? "Not available" : "Loading..."}
               </span>
             </div>
             {currentFileInfo?.extension && (
@@ -394,7 +403,7 @@ export const DatapointEditorPanel = ({
             <WaveformViewer
               audioUrl={audioUrl}
               isPlaying={isPlaying}
-              requireCredentials={!localPreview && isDemoDatasetPlayback}
+              requireCredentials={!localPreview && isVerificationRecordingSelected}
               onReady={(wavesurfer) => {
 
                 wavesurferRef.current = wavesurfer;

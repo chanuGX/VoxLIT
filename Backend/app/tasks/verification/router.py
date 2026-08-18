@@ -18,7 +18,9 @@ from dataclasses import asdict
 
 from app.services.dataset_service import media_type_for
 
-from . import cache, clustering, session_assets
+from app.core.session import InvalidSessionId, validate_session_id
+
+from . import cache, clustering, custom_recordings, session_assets
 from .audio_streaming import stream_audio_file
 from .dataset import (
     DatasetUnavailable,
@@ -111,6 +113,63 @@ async def dataset_recording_audio(recording_id: str, request: Request):
     return stream_audio_file(audio_path, request, safe_name, media_type)
 
 
+# ---------------------------------------------------------------------------
+# Custom-dataset recordings -- Speaker Verification's own opaque `crec_...`
+# identity layer over the hardened Custom Dataset Manager. Never exposes the
+# generic `custom:{session_id}:{dataset_name}` identifier used by
+# Transcription/Emotion; see custom_recordings.py for the full contract.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dataset/custom")
+async def list_owned_custom_datasets(request: Request):
+    """Session-id-free dataset summaries (name, file count, created-at) for
+    Verification's own dataset picker/restoration -- never `session_id`,
+    `formatted_name`, or a per-file list."""
+
+    sid = _require_sid(request)
+    summaries = custom_recordings.list_owned_datasets_safe(sid)
+    return {"datasets": [asdict(summary) for summary in summaries]}
+
+
+@router.get("/dataset/custom/{dataset_name}/recordings")
+async def list_custom_dataset_recordings(dataset_name: str, request: Request):
+    sid = _require_sid(request)
+    try:
+        recordings = await custom_recordings.list_custom_recordings(sid, dataset_name)
+    except custom_recordings.CustomRecordingNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except custom_recordings.CustomRecordingRegistryUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except custom_recordings.CustomRecordingCollision as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+    return {
+        "dataset_name": dataset_name,
+        "recordings": [asdict(recording) for recording in recordings],
+    }
+
+
+@router.get("/custom-recordings/{recording_id}/audio")
+@router.head("/custom-recordings/{recording_id}/audio")
+async def custom_recording_audio(recording_id: str, request: Request):
+    sid = _require_sid(request)
+    try:
+        audio_path = await custom_recordings.resolve_custom_recording_path(recording_id, sid)
+    except custom_recordings.CustomRecordingNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except custom_recordings.CustomRecordingRegistryUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    try:
+        media_type = media_type_for(audio_path)
+    except ValueError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+
+    safe_name = f"{recording_id}{audio_path.suffix.lower()}"
+    return stream_audio_file(audio_path, request, safe_name, media_type)
+
+
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MIN_BATCH_SIZE = 2
@@ -152,13 +211,14 @@ def _save_upload(file: UploadFile, destination: Path) -> None:
 
 
 async def _resolve_audio_source(recording_id: str, sid: str) -> Path:
-    """Resolve a demo `rec_...` id or a session `asset_...` id to a Path.
+    """Resolve a demo `rec_...` id, a session `asset_...` id, or an owned
+    custom-dataset `crec_...` id to a Path.
 
-    Only an `asset_...`-prefixed id is routed to session-asset resolution;
-    everything else (including unknown or path-traversal-shaped ids) falls
-    through to `resolve_recording_path`, which never touches the filesystem
-    with untrusted input and 404s on any non-match -- unchanged from its
-    existing dataset-only behavior.
+    Each prefix is routed to exactly one resolver and never falls through to
+    another; everything else (including unknown or path-traversal-shaped
+    ids) falls through to `resolve_recording_path`, which never touches the
+    filesystem with untrusted input and 404s on any non-match -- unchanged
+    from its existing dataset-only behavior.
     """
 
     if recording_id.startswith("asset_"):
@@ -166,6 +226,14 @@ async def _resolve_audio_source(recording_id: str, sid: str) -> Path:
             return await session_assets.resolve_session_asset_path(recording_id, sid)
         except session_assets.SessionAssetNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
+
+    if recording_id.startswith("crec_"):
+        try:
+            return await custom_recordings.resolve_custom_recording_path(recording_id, sid)
+        except custom_recordings.CustomRecordingNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except custom_recordings.CustomRecordingRegistryUnavailable as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     try:
         return resolve_recording_path(recording_id)

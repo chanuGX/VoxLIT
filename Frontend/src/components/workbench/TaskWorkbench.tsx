@@ -17,7 +17,28 @@ import {
   SessionAssetMetadata,
   LocalFilePreview,
 } from '@/tasks/types';
-import { TASK_SLOTS, getModelLabel, VERIFICATION_DEMO_DATASET_ID } from '@/tasks/registry';
+import {
+  TASK_SLOTS,
+  getModelLabel,
+  VERIFICATION_DEMO_DATASET_ID,
+  VERIFICATION_CUSTOM_DATASET_PREFIX,
+  VERIFICATION_CUSTOM_DATASET_STORAGE_KEY,
+  isValidCustomDatasetName,
+} from '@/tasks/registry';
+import { toast } from 'sonner';
+
+/** Reads the saved custom dataset name from sessionStorage, validating it
+ *  locally first -- a malformed value is removed immediately rather than
+ *  ever being used to construct a `verification-custom:` selector. */
+function readSavedVerificationDataset(): string | null {
+  const saved = sessionStorage.getItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+  if (!saved) return null;
+  if (!isValidCustomDatasetName(saved)) {
+    sessionStorage.removeItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+    return null;
+  }
+  return saved;
+}
 
 interface TaskWorkbenchProps {
   task: TaskDefinition;
@@ -34,7 +55,23 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<UploadedFile | null>(null);
   const [model, setModel] = useState(task.defaultModel ?? "");
-  const [dataset, setDataset] = useState(task.defaultDataset ?? "");
+  // Verification-only: if a custom dataset was saved from a previous visit,
+  // the initial value is ALREADY the custom selector, synchronously, before
+  // any effect runs -- this is what keeps the demo dataset's auto-select-all
+  // effect (below) from ever firing during restoration, since `dataset`
+  // never actually equals VERIFICATION_DEMO_DATASET_ID in that case.
+  const [dataset, setDataset] = useState(() => {
+    if (task.id === 'verification') {
+      const saved = readSavedVerificationDataset();
+      if (saved) return `${VERIFICATION_CUSTOM_DATASET_PREFIX}${saved}`;
+    }
+    return task.defaultDataset ?? "";
+  });
+  // Verification-only: true while a saved custom dataset selection is being
+  // confirmed against the caller's actual owned dataset list.
+  const [verificationRestoring, setVerificationRestoring] = useState(
+    () => task.id === 'verification' && readSavedVerificationDataset() !== null
+  );
   const [batchInferenceStatus, setBatchInferenceStatus] = useState<'idle' | 'running' | 'done'>('idle');
   const [availableFiles, setAvailableFiles] = useState<string[]>([]);
   const [selectedEmbeddingFile, setSelectedEmbeddingFile] = useState<string | null>(null);
@@ -59,6 +96,12 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [reprojectFn, setReprojectFn] = useState<((method: string, n: number) => void) | null>(null);
   const [labelResolverFn, setLabelResolverFn] = useState<((label: string) => string | undefined) | null>(null);
+  // Verification-only: bumped when files are uploaded into the currently
+  // active custom dataset, so AudioDatasetPanel re-fetches its recordings
+  // without `dataset`/`effectiveDataset` changing -- deliberately NOT part
+  // of the key used to remount WorkbenchCenter/EmbeddingPanel below, since
+  // adding files to the still-active dataset is not a source change.
+  const [customDatasetRefreshToken, setCustomDatasetRefreshToken] = useState(0);
 
   // Fetch previously created session assets once on load so they survive a
   // page refresh — verification only.
@@ -95,10 +138,13 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
   // the merged "safe recording" list passed to any consumer that needs to
   // resolve an opaque id (rec_... or asset_...) to a display label/size, or
   // to play it back. Verification-only; empty/null for every other task.
-  const verificationRecordings = useMemo(
-    () => [...(datasetRecordings ?? []), ...sessionAssets],
-    [datasetRecordings, sessionAssets]
-  );
+  const verificationRecordings = useMemo(() => {
+    const merged = [...(datasetRecordings ?? []), ...sessionAssets];
+    // Defense-in-depth dedup -- crec_/rec_/asset_ are disjoint namespaces so
+    // this should never actually trigger, but guarantees one entry per id
+    // regardless.
+    return Array.from(new Map(merged.map((r) => [r.recording_id, r])).values());
+  }, [datasetRecordings, sessionAssets]);
 
   // Real "N uploaded" count for the top-bar-driven Upload button — counts
   // only session assets whose origin is an actual upload, never the 92
@@ -166,6 +212,132 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
     verificationAutoSelectRef.current = true;
     setSelectedBatchIds(datasetRecordings.map((r) => r.recording_id));
   }, [task.id, dataset, datasetRecordings, selectedBatchIds]);
+
+  // Verification-only: confirm a restored custom-dataset selection against
+  // the caller's actual owned dataset list. The whole fetch-and-parse flow
+  // is inside one try/catch, and `ac.signal.aborted` is checked before every
+  // subsequent state update (not only via catching AbortError), since an
+  // abort can race between `fetch()` resolving and `res.json()` running.
+  // Only two outcomes ever clear the saved selection: a successful response
+  // proving the dataset is genuinely absent, or a definitive non-5xx
+  // failure (e.g. an auth/session problem). A 5xx or a transport failure is
+  // treated as transient -- the saved selection is kept and a retry-able
+  // error is surfaced, never silently discarded.
+  useEffect(() => {
+    if (task.id !== 'verification') return;
+    const saved = readSavedVerificationDataset();
+    if (!saved) {
+      setVerificationRestoring(false);
+      return;
+    }
+    const ac = new AbortController();
+    (async () => {
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}/tasks/verification/dataset/custom`, {
+          credentials: 'include',
+          signal: ac.signal,
+        });
+      } catch (e) {
+        if ((e as { name?: string } | null)?.name === 'AbortError') return;
+        toast.error('Could not confirm your saved dataset — retry or reselect it from Manage Datasets.');
+        setVerificationRestoring(false);
+        return;
+      }
+      if (ac.signal.aborted) return;
+
+      if (res.status >= 500) {
+        toast.error('Could not confirm your saved dataset — retry or reselect it from Manage Datasets.');
+        setVerificationRestoring(false);
+        return;
+      }
+      if (!res.ok) {
+        sessionStorage.removeItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+        setDataset(task.defaultDataset ?? '');
+        setVerificationRestoring(false);
+        return;
+      }
+
+      try {
+        const data = await res.json() as { datasets: Array<{ dataset_name: string }> };
+        if (ac.signal.aborted) return;
+        if (!data.datasets.some((d) => d.dataset_name === saved)) {
+          sessionStorage.removeItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+          setDataset(task.defaultDataset ?? '');
+        }
+        setVerificationRestoring(false);
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        toast.error('Could not confirm your saved dataset — retry or reselect it from Manage Datasets.');
+        setVerificationRestoring(false);
+      }
+    })();
+    return () => ac.abort();
+  }, [task.id]);
+
+  // Verification-only: prune selectedBatchIds against the currently
+  // eligible recording set after every change, unconditionally. Without
+  // this, switching from Dataset A (with ids selected) straight to Dataset
+  // B would leave Dataset A's now-foreign ids sitting in selectedBatchIds
+  // -- and since crec_ mappings deliberately remain valid across a switch
+  // (needed for the multi-tab guarantee), those stray ids could otherwise
+  // silently leak into a batch run for Dataset B.
+  useEffect(() => {
+    if (task.id !== 'verification') return;
+    setSelectedBatchIds((prev) => {
+      const eligible = new Set(verificationRecordings.map((r) => r.recording_id));
+      const next = prev.filter((id) => eligible.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [task.id, verificationRecordings]);
+
+  // Verification-only: clears TaskWorkbench-owned state that may reference
+  // the previous dataset's recordings on EVERY genuine dataset-identity
+  // switch (not just deletion) -- a plain dropdown/modal switch previously
+  // left this stale. Uses a ref (not a dependency-array "changed since
+  // mount" trick) so it never fires on the very first render. Child-owned
+  // state (batch results, saliency, Pair Verification workspace, graph
+  // selection) is cleared separately via the key={effectiveDataset} remount
+  // below, not here. pairSelectionLabels/perturbationResult/predictionMap
+  // already clear via existing effects that key off `dataset`/`selectedFile`
+  // /`selectedEmbeddingFile` (see above/below) -- no need to duplicate that
+  // here.
+  const prevVerificationDatasetRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (task.id !== 'verification') return;
+    const isFirstRun = prevVerificationDatasetRef.current === null;
+    const changed = !isFirstRun && prevVerificationDatasetRef.current !== dataset;
+    prevVerificationDatasetRef.current = dataset;
+    if (!changed) return;
+
+    setSelectedFile(null);
+    setSelectedEmbeddingFile(null);
+    setLocalPreview(null);
+    setDatasetRecordings(null);
+  }, [task.id, dataset]);
+
+  // Verification-only: handles CustomDatasetManager's created/uploaded/
+  // deleted events. 'created' is a no-op here -- Toolbar's
+  // handleDatasetCreated already performs the one state transition that
+  // matters (selecting the new dataset), which itself flows through the
+  // dataset-transition effect above.
+  const activeCustomDatasetName = dataset.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX)
+    ? dataset.slice(VERIFICATION_CUSTOM_DATASET_PREFIX.length)
+    : null;
+
+  const handleCustomDatasetChanged = useCallback(
+    (event: { type: 'created' | 'uploaded' | 'deleted'; datasetName: string }) => {
+      if (event.type === 'deleted' && event.datasetName === activeCustomDatasetName) {
+        sessionStorage.removeItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+        setDataset(task.defaultDataset ?? '');
+        return;
+      }
+      if (event.type === 'uploaded' && event.datasetName === activeCustomDatasetName) {
+        setCustomDatasetRefreshToken((t) => t + 1);
+      }
+    },
+    [activeCustomDatasetName, task.defaultDataset]
+  );
 
   // Prediction state
   const [wav2vecPrediction, setWav2vecPrediction] = useState<Wav2Vec2Prediction | null>(null);
@@ -501,8 +673,11 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
 
   // Determine effective dataset based on uploaded files and custom datasets
   const effectiveDataset = (() => {
-    // If a custom dataset is selected (starts with custom:), use it as-is
-    if (dataset.startsWith('custom:')) {
+    // If a custom dataset is selected (Transcription/Emotion's custom: or
+    // Verification's verification-custom:), use it as-is -- a selected
+    // Verification custom dataset must never be replaced by the legacy
+    // "custom" sentinel merely because session assets/uploaded files exist.
+    if (dataset.startsWith('custom:') || dataset.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX)) {
       return dataset;
     }
     // Legacy behavior: if there are uploaded files and no custom dataset, show as "custom"
@@ -676,6 +851,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
           onBatchInference={handleBatchInference}
           onUploadSuccess={handleUploadSuccess}
           onVerificationAssetUpload={handleVerificationAssetCreated}
+          onCustomDatasetChanged={handleCustomDatasetChanged}
         />
 
         {/* Main Content Area */}
@@ -684,6 +860,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
             {/* Left Panel: Embeddings & Scalar Plots */}
             <Panel defaultSize={25} minSize={20}>
               <EmbeddingPanel
+                key={task.id === 'verification' ? effectiveDataset : undefined}
                 model={model}
                 dataset={dataset}
                 batchAnalysis={task.capabilities.batchAnalysis}
@@ -705,6 +882,7 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 <Panel defaultSize={70} minSize={40}>
                   {WorkbenchCenter ? (
                     <WorkbenchCenter
+                      key={task.id === 'verification' ? effectiveDataset : undefined}
                       model={model}
                       modelLabel={getModelLabel(task, model)}
                       dataset={effectiveDataset}
@@ -768,6 +946,8 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                     onVerificationRecordingsChange={setDatasetRecordings}
                     sessionAssets={sessionAssets}
                     verificationUploadedCount={task.id === 'verification' ? uploadedCount : undefined}
+                    refreshToken={customDatasetRefreshToken}
+                    isRestoringDataset={task.id === 'verification' ? verificationRestoring : undefined}
                   />
                 </Panel>
               </PanelGroup>
