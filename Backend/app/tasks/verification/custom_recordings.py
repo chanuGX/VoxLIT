@@ -79,6 +79,11 @@ def _mapping_key(sid: str, recording_id: str) -> str:
     return f"verify:crec:map:{sid}:{recording_id}"
 
 
+def _needs_duration_repair(file_entry: dict) -> bool:
+    duration = file_entry.get("duration")
+    return duration is None or duration <= 0
+
+
 def list_owned_datasets_safe(sid: str) -> list[CustomDatasetSummary]:
     """Session-id-free dataset summaries for Verification's own dataset
     picker -- never `session_id`, never `formatted_name`, never a per-file
@@ -118,6 +123,9 @@ async def list_custom_recordings(sid: str, dataset_name: str) -> list[CustomReco
     metadata = manager.get_dataset_metadata(safe_name)
     if metadata is None:
         raise CustomRecordingNotFound(f"Unknown custom dataset: {dataset_name}")
+
+    if any(_needs_duration_repair(entry) for entry in metadata["files"]):
+        metadata = await manager.repair_missing_durations(safe_name)
 
     seen: dict[str, str] = {}
     infos: list[CustomRecordingInfo] = []

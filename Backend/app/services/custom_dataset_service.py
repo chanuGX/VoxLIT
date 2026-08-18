@@ -7,11 +7,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import librosa
 from fastapi import UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.core.settings import BACKEND_DIR
 from app.core.session import validate_session_id
+from app.services.audio_metadata import probe_audio_duration
 
 logger = logging.getLogger(__name__)
 
@@ -281,18 +282,16 @@ class CustomDatasetManager:
                 raise
 
             try:
-                try:
-                    duration = librosa.get_duration(path=str(final_path))
-                    _audio_data, sample_rate = librosa.load(final_path, sr=None)
-                except Exception as e:
-                    logger.warning(f"Could not extract audio metadata for {stored_filename}: {e}")
-                    duration = 0.0
-                    sample_rate = 0
+                # Probed only now that final_path is the fully-written,
+                # finalized file (never the temp path mid-write).
+                probe = await run_in_threadpool(probe_audio_duration, final_path)
+                duration = round(probe.duration_seconds, 2) if probe else None
+                sample_rate = probe.sample_rate if probe else None
 
                 file_metadata = {
                     "filename": stored_filename,
                     "original_filename": filename,
-                    "duration": round(duration, 2),
+                    "duration": duration,
                     "sample_rate": sample_rate,
                     "size": total_bytes,
                     "uploaded_at": datetime.utcnow().isoformat(),
@@ -367,6 +366,52 @@ class CustomDatasetManager:
 
         return file_path
 
+    async def repair_missing_durations(self, dataset_name: str) -> Dict:
+        """Recomputes duration for every file whose stored duration is
+        missing, null, or non-positive, using the same probe used at upload
+        time. Resolves each file through the same containment-safe
+        `resolve_file_path` used everywhere else, under the same per-dataset
+        lock and atomic-write mechanism as `add_file_to_dataset_stream` --
+        so this never races a concurrent upload/delete and never leaves a
+        partially-written metadata file. Files that still fail to probe
+        (moved, deleted, genuinely corrupt) are left as `None` rather than
+        being coerced into a false `0.0`."""
+        dataset_dir = self._dataset_dir(dataset_name)
+
+        lock = _dataset_lock_registry.get(self.session_id, dataset_name)
+        async with lock:
+            metadata = self._read_metadata(dataset_dir)
+            if metadata is None:
+                raise ValueError(f"Dataset '{dataset_name}' does not exist")
+
+            changed = False
+            for file_entry in metadata["files"]:
+                duration = file_entry.get("duration")
+                if duration is not None and duration > 0:
+                    continue
+
+                try:
+                    file_path = self.resolve_file_path(dataset_name, file_entry["filename"])
+                except (FileNotFoundError, ValueError) as e:
+                    logger.warning(
+                        f"Could not resolve '{file_entry['filename']}' in dataset "
+                        f"'{dataset_name}' for duration repair: {e}"
+                    )
+                    continue
+
+                probe = await run_in_threadpool(probe_audio_duration, file_path)
+                if probe is None:
+                    continue
+
+                file_entry["duration"] = round(probe.duration_seconds, 2)
+                file_entry["sample_rate"] = probe.sample_rate
+                changed = True
+
+            if changed:
+                self._write_metadata_atomic(dataset_dir, metadata)
+
+            return metadata
+
     def get_dataset_files_as_csv_format(self, dataset_name: str) -> List[Dict[str, str]]:
         """Get dataset files in the same format as global datasets (for compatibility)"""
         metadata = self.get_dataset_metadata(dataset_name)
@@ -375,10 +420,16 @@ class CustomDatasetManager:
 
         csv_format_files = []
         for file_info in metadata["files"]:
+            duration = file_info.get("duration")
+            sample_rate = file_info.get("sample_rate")
             csv_format_files.append({
                 "filename": file_info["filename"],
-                "duration": str(file_info["duration"]),
-                "sample_rate": str(file_info.get("sample_rate", 0)),
+                # Unknown duration/sample_rate (probe failed) stays an empty
+                # string here rather than the literal text "None" -- callers
+                # (Transcription/Emotion's generic dataset listing) already
+                # treat an empty/non-numeric string as "no value".
+                "duration": "" if duration is None else str(duration),
+                "sample_rate": "" if sample_rate is None else str(sample_rate),
                 "size": str(file_info["size"]),
                 "uploaded_at": file_info["uploaded_at"]
             })

@@ -137,6 +137,35 @@ async def test_custom_recording_listing_has_safe_fields_only(client):
 
 
 @pytest.mark.asyncio
+async def test_custom_recording_listing_repairs_zero_duration_without_reupload(client, isolated_storage):
+    # Capture the session cookie the way test_safe_dataset_listing_never_leaks_session_id
+    # does -- it's only issued on the response that first establishes it.
+    models_response = await client.get("/tasks/verification/models")
+    sid = models_response.cookies.get(settings.SESSION_COOKIE_NAME)
+
+    await _create_dataset_with_recordings(client, "My Voices", ("clip.wav",))
+
+    # Simulate a historically-broken entry the way the old librosa fallback
+    # used to persist it, bypassing the (now-fixed) upload path entirely.
+    dataset_dir = isolated_storage / sid / "datasets" / "My Voices"
+    metadata = cds.CustomDatasetManager._read_metadata(dataset_dir)
+    assert metadata["files"][0]["duration"] > 0  # sanity: upload really did extract it
+    metadata["files"][0]["duration"] = 0.0
+    metadata["files"][0]["sample_rate"] = 0
+    cds.CustomDatasetManager._write_metadata_atomic(dataset_dir, metadata)
+
+    listing = await client.get("/tasks/verification/dataset/custom/My Voices/recordings")
+    assert listing.status_code == 200
+    recordings = listing.json()["recordings"]
+    assert recordings[0]["duration_seconds"] is not None
+    assert recordings[0]["duration_seconds"] > 0
+
+    # Repair persisted to disk too, not just the one response.
+    on_disk = cds.CustomDatasetManager._read_metadata(dataset_dir)
+    assert on_disk["files"][0]["duration"] > 0
+
+
+@pytest.mark.asyncio
 async def test_safe_dataset_listing_contains_only_safe_fields(client):
     await _create_custom_dataset(client, "My Voices")
     response = await client.get("/tasks/verification/dataset/custom")

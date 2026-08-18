@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import secrets
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,6 +20,8 @@ from starlette.datastructures import UploadFile
 from app.core.session import InvalidSessionId, validate_session_id
 from app.services import custom_dataset_service as cds
 from app.services import dataset_service
+
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 def _valid_sid() -> str:
@@ -31,6 +34,14 @@ def _wav_bytes(*, sample_rate: int = 16000, seconds: float = 0.2, freq: float = 
     buffer = io.BytesIO()
     sf.write(buffer, audio, sample_rate, format="WAV")
     return buffer.getvalue()
+
+
+def _mp3_bytes() -> bytes:
+    return (FIXTURES_DIR / "tiny_clip.mp3").read_bytes()
+
+
+def _corrupt_bytes() -> bytes:
+    return b"\x00\x01\x02\x03NOT REAL AUDIO DATA" * 50
 
 
 def _make_upload(data: bytes, filename: str) -> UploadFile:
@@ -407,3 +418,112 @@ def test_load_metadata_builtin_dataset_ignores_session(isolated_storage):
     rows = dataset_service.load_metadata("common-voice", session_id=None)
     assert isinstance(rows, list)
     assert len(rows) > 0
+
+
+# ---------------------------------------------------------------------------
+# Duration extraction: fresh uploads, extraction failure, repair
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fresh_wav_upload_returns_positive_duration(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+
+    file_metadata = await manager.add_file_to_dataset_stream(
+        "d1", "clip.wav", _make_upload(_wav_bytes(seconds=0.5), "clip.wav")
+    )
+
+    assert file_metadata["duration"] is not None
+    assert file_metadata["duration"] > 0
+    assert file_metadata["sample_rate"] is not None
+
+
+@pytest.mark.asyncio
+async def test_fresh_mp3_upload_returns_positive_duration(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+
+    file_metadata = await manager.add_file_to_dataset_stream(
+        "d1", "clip.mp3", _make_upload(_mp3_bytes(), "clip.mp3")
+    )
+
+    assert file_metadata["duration"] is not None
+    assert file_metadata["duration"] > 0
+    assert file_metadata["sample_rate"] is not None
+
+
+@pytest.mark.asyncio
+async def test_extraction_failure_stores_null_not_zero(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+
+    file_metadata = await manager.add_file_to_dataset_stream(
+        "d1", "corrupt.wav", _make_upload(_corrupt_bytes(), "corrupt.wav")
+    )
+
+    assert file_metadata["duration"] is None
+    assert file_metadata["sample_rate"] is None
+
+    metadata = manager.get_dataset_metadata("d1")
+    assert metadata["files"][0]["duration"] is None
+
+
+@pytest.mark.asyncio
+async def test_repair_missing_durations_fixes_zero_duration_entry(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+    await manager.add_file_to_dataset_stream("d1", "clip.wav", _make_upload(_wav_bytes(seconds=0.5), "clip.wav"))
+
+    # Simulate a historically-broken entry the way the old librosa fallback
+    # used to persist it, bypassing the (now-fixed) upload path entirely.
+    dataset_dir = tmp_path / sid / "datasets" / "d1"
+    metadata = cds.CustomDatasetManager._read_metadata(dataset_dir)
+    metadata["files"][0]["duration"] = 0.0
+    metadata["files"][0]["sample_rate"] = 0
+    cds.CustomDatasetManager._write_metadata_atomic(dataset_dir, metadata)
+
+    repaired = await manager.repair_missing_durations("d1")
+
+    assert repaired["files"][0]["duration"] > 0
+    assert repaired["files"][0]["sample_rate"] > 0
+    persisted = manager.get_dataset_metadata("d1")
+    assert persisted["files"][0]["duration"] > 0
+
+
+@pytest.mark.asyncio
+async def test_repair_missing_durations_leaves_unresolvable_entry_null(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+    await manager.add_file_to_dataset_stream("d1", "clip.wav", _make_upload(_wav_bytes(), "clip.wav"))
+
+    dataset_dir = tmp_path / sid / "datasets" / "d1"
+    metadata = cds.CustomDatasetManager._read_metadata(dataset_dir)
+    metadata["files"][0]["duration"] = None
+    metadata["files"][0]["filename"] = "gone.wav"  # no longer resolves on disk
+    cds.CustomDatasetManager._write_metadata_atomic(dataset_dir, metadata)
+
+    repaired = await manager.repair_missing_durations("d1")
+
+    assert repaired["files"][0]["duration"] is None
+
+
+@pytest.mark.asyncio
+async def test_repair_missing_durations_only_writes_when_something_changed(tmp_path):
+    sid = _valid_sid()
+    manager = cds.CustomDatasetManager(sid, base_dir=tmp_path)
+    manager.create_dataset("d1")
+    await manager.add_file_to_dataset_stream("d1", "clip.wav", _make_upload(_wav_bytes(), "clip.wav"))
+
+    dataset_dir = tmp_path / sid / "datasets" / "d1"
+    metadata_file = dataset_dir / "dataset_metadata.json"
+    mtime_before = metadata_file.stat().st_mtime_ns
+
+    await manager.repair_missing_durations("d1")
+
+    assert metadata_file.stat().st_mtime_ns == mtime_before
