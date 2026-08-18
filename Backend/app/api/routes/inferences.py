@@ -236,25 +236,7 @@ async def batch_whisper_analysis(request: Request):
                 
                 # Try to get from cache first
                 cached_result = await get_result(model, cache_key)
-                
-                # If not found and this is a custom dataset with session mismatch, try alternative cache keys
-                if cached_result is None and dataset and dataset.startswith('custom:'):
-                    from app.services.custom_dataset_service import parse_custom_dataset_name
-                    try:
-                        session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
-                        if session_id_from_name != session_id:
-                            # Try cache key with the original session ID path
-                            from app.services.custom_dataset_service import get_custom_dataset_manager
-                            original_manager = get_custom_dataset_manager(session_id_from_name)
-                            original_file_path = original_manager.resolve_file_path(dataset_name, filename)
-                            original_hash = hashlib.md5(str(original_file_path).encode()).hexdigest()
-                            original_cache_key = f"{model}_{original_hash}"
-                            cached_result = await get_result(model, original_cache_key)
-                            if cached_result is not None:
-                                logger.info(f"Found cached result using original session path for {filename}")
-                    except Exception as e:
-                        logger.warning(f"Could not try alternative cache key for {filename}: {e}")
-                
+
                 transcript = None
                 if cached_result is not None:
                     # Extract transcript from cached result

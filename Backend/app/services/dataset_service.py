@@ -3,9 +3,10 @@ from typing import Dict, List, Optional
 import csv
 import librosa
 import logging
+from app.core.session import validate_session_id, InvalidSessionId
 from .custom_dataset_service import (
-    get_custom_dataset_manager, 
-    is_custom_dataset, 
+    get_custom_dataset_manager,
+    is_custom_dataset,
     parse_custom_dataset_name
 )
 
@@ -42,23 +43,27 @@ def calculate_audio_duration(audio_path: Path) -> float:
 
 def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[str, str]]:
     """Load metadata for both global and custom datasets"""
-    
-    # Handle custom datasets
+
+    # Handle custom datasets. Authorization is always derived from the
+    # caller's own canonical session (request.state.sid, always populated by
+    # SessionMiddleware -- see app/core/session.py), never from the session
+    # id embedded in the dataset string itself. A mismatch (including a
+    # freshly-minted session that can never equal another session's id) is
+    # treated identically to "unknown dataset" -- there is no fallback that
+    # serves data using the embedded id.
     if is_custom_dataset(dataset):
-        if not session_id:
-            raise ValueError("session_id is required for custom datasets")
-        
+        try:
+            validated_caller_sid = validate_session_id(session_id)
+        except InvalidSessionId:
+            raise ValueError(f"Unknown dataset: {dataset}")
+
         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
-        logger.info(f"Custom dataset metadata: session_id_from_name='{session_id_from_name}', current_session_id='{session_id}'")
-        if session_id_from_name != session_id:
-            logger.warning(f"Session ID mismatch in metadata: dataset has '{session_id_from_name}' but request has '{session_id}'")
-            # Use the dataset's session ID instead
-            manager = get_custom_dataset_manager(session_id_from_name)
-            return manager.get_dataset_files_as_csv_format(dataset_name)
-        
-        manager = get_custom_dataset_manager(session_id)
+        if session_id_from_name != validated_caller_sid:
+            raise ValueError(f"Unknown dataset: {dataset}")
+
+        manager = get_custom_dataset_manager(validated_caller_sid)
         return manager.get_dataset_files_as_csv_format(dataset_name)
-    
+
     # Handle global datasets (existing logic)
     ds = dataset.lower()
     if ds not in DATASET_PATHS:
@@ -104,27 +109,24 @@ def load_metadata(dataset: str, session_id: Optional[str] = None) -> List[Dict[s
 
 def resolve_file(dataset: str, file_path: str, session_id: Optional[str] = None) -> Path:
     """Resolve file path for both global and custom datasets"""
-    
-    # Handle custom datasets
+
+    # Handle custom datasets. Same rule as load_metadata(): only the
+    # caller's own validated session may resolve a custom dataset's files --
+    # a mismatched or malformed session is indistinguishable from the
+    # dataset simply not existing, never served via a fallback.
     if is_custom_dataset(dataset):
-        if not session_id:
-            raise ValueError("session_id is required for custom datasets")
-        
+        try:
+            validated_caller_sid = validate_session_id(session_id)
+        except InvalidSessionId:
+            raise FileNotFoundError(f"Dataset file not found: {file_path}")
+
         session_id_from_name, dataset_name = parse_custom_dataset_name(dataset)
-        logger.info(f"Custom dataset: session_id_from_name='{session_id_from_name}', current_session_id='{session_id}'")
-        if session_id_from_name != session_id:
-            logger.warning(f"Session ID mismatch: dataset has '{session_id_from_name}' but request has '{session_id}'")
-            # For debugging, let's check if the file exists with the dataset's session ID
-            manager = get_custom_dataset_manager(session_id_from_name)
-            try:
-                return manager.resolve_file_path(dataset_name, file_path)
-            except Exception as e:
-                logger.error(f"Could not resolve file with dataset session ID: {e}")
-                raise ValueError(f"Session ID mismatch for custom dataset. Dataset session: {session_id_from_name}, Request session: {session_id}")
-        
-        manager = get_custom_dataset_manager(session_id)
+        if session_id_from_name != validated_caller_sid:
+            raise FileNotFoundError(f"Dataset file not found: {file_path}")
+
+        manager = get_custom_dataset_manager(validated_caller_sid)
         return manager.resolve_file_path(dataset_name, file_path)
-    
+
     # Handle global datasets (existing logic)
     ds = dataset.lower()
     if ds not in DATASET_BASE_DIRS:
