@@ -91,7 +91,7 @@ export const TASKS: TaskDefinition[] = [
     defaultModel: "ecapa-tdnn",
     datasets: [{ id: "voxceleb1-indian-demo", label: "VoxCeleb1 Indian (Demo)", available: true }],
     defaultDataset: "voxceleb1-indian-demo",
-    allowCustomDatasets: false,
+    allowCustomDatasets: true,
     capabilities: {
       saliency: false,
       attention: false,
@@ -166,6 +166,25 @@ export const BUILTIN_DATASET_IDS: string[] = Array.from(
 export const VERIFICATION_DEMO_DATASET_ID = "voxceleb1-indian-demo";
 export const isVerificationDemoDataset = (datasetId?: string | null): boolean =>
   datasetId === VERIFICATION_DEMO_DATASET_ID;
+
+/**
+ * Speaker Verification's own custom-dataset selector prefix. Deliberately
+ * distinct from Transcription/Emotion's `custom:{session_id}:{name}` (which
+ * embeds a raw session id) — Verification's selector never carries a
+ * session id anywhere: `verification-custom:<bare dataset name>`.
+ */
+export const VERIFICATION_CUSTOM_DATASET_PREFIX = "verification-custom:";
+
+/** Tab-scoped, session-id-free persistence of the active Verification
+ *  custom dataset across a page refresh. Holds only the bare dataset name. */
+export const VERIFICATION_CUSTOM_DATASET_STORAGE_KEY = "voxlit:verification:custom-dataset";
+
+/** Mirrors the backend's `validate_dataset_name` character class
+ *  (`Backend/app/services/custom_dataset_service.py`) — used to validate a
+ *  `sessionStorage`-restored dataset name locally before ever constructing
+ *  a `verification-custom:` selector from it. */
+export const isValidCustomDatasetName = (name: string): boolean =>
+  /^[A-Za-z0-9 _-]{1,100}$/.test(name);
 
 /** Label for a model id within a task (falls back to the raw id). */
 export const getModelLabel = (task: TaskDefinition, modelId: string): string =>

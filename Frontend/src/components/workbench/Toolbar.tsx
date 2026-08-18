@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
 import { CustomDatasetManager } from '@/components/dataset/CustomDatasetManager';
 import { TaskDefinition, UploadedFile, SessionAssetMetadata } from '@/tasks/types';
+import { VERIFICATION_CUSTOM_DATASET_PREFIX, VERIFICATION_CUSTOM_DATASET_STORAGE_KEY } from '@/tasks/registry';
 
 interface ToolbarProps {
   task: TaskDefinition;
@@ -32,6 +33,10 @@ interface ToolbarProps {
   /** Speaker Verification only: routes uploads through the session-scoped
    *  asset endpoint instead of the legacy /upload route. */
   onVerificationAssetUpload?: (asset: SessionAssetMetadata) => void;
+  /** Speaker Verification only: forwarded from CustomDatasetManager's
+   *  create/upload/delete events so TaskWorkbench can refresh/reconcile
+   *  derived state without re-deriving anything from a response field. */
+  onCustomDatasetChanged?: (event: { type: 'created' | 'uploaded' | 'deleted'; datasetName: string }) => void;
 }
 
 interface CustomDataset {
@@ -44,7 +49,7 @@ interface CustomDataset {
  * Registry-driven toolbar: model and dataset dropdowns come from the task
  * definition in src/tasks/registry.tsx — never hardcode options here.
  */
-export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, onUploadSuccess, onVerificationAssetUpload }: ToolbarProps) => {
+export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model, setModel, dataset, setDataset, onBatchInference, onUploadSuccess, onVerificationAssetUpload, onCustomDatasetChanged }: ToolbarProps) => {
   const [customDatasets, setCustomDatasets] = useState<CustomDataset[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -126,13 +131,21 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
 
   const fetchCustomDatasets = async () => {
     try {
-      const response = await fetch(`${API_BASE}/upload/dataset/list`, {
+      const url = task.id === 'verification'
+        ? `${API_BASE}/tasks/verification/dataset/custom`
+        : `${API_BASE}/upload/dataset/list`;
+      const response = await fetch(url, {
         credentials: 'include'
       });
 
       if (response.ok) {
         const data = await response.json();
-        setCustomDatasets(data.datasets || []);
+        if (task.id === 'verification') {
+          const safeDatasets = (data.datasets ?? []) as Array<{ dataset_name: string; total_files: number }>;
+          setCustomDatasets(safeDatasets.map((d) => ({ dataset_name: d.dataset_name, formatted_name: '', total_files: d.total_files })));
+        } else {
+          setCustomDatasets(data.datasets || []);
+        }
       }
     } catch (err) {
       console.error('Error fetching custom datasets:', err);
@@ -143,15 +156,30 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
     if (task.allowCustomDatasets) {
       fetchCustomDatasets();
     }
-  }, [task.allowCustomDatasets]);
+  }, [task.allowCustomDatasets, task.id]);
 
-  const handleDatasetCreated = (datasetName: string) => {
+  const handleDatasetCreated = (formattedName: string, datasetName: string) => {
     fetchCustomDatasets(); // Refresh the list
-    setDataset(datasetName); // Automatically select the new dataset
+    if (task.id === 'verification') {
+      sessionStorage.setItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY, datasetName);
+      setDataset(`${VERIFICATION_CUSTOM_DATASET_PREFIX}${datasetName}`);
+    } else {
+      setDataset(formattedName); // Automatically select the new dataset — unchanged for other tasks
+    }
   };
 
-  const handleDatasetSelected = (datasetName: string) => {
-    setDataset(datasetName);
+  const handleDatasetSelected = (formattedName: string, datasetName: string) => {
+    if (task.id === 'verification') {
+      sessionStorage.setItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY, datasetName);
+      setDataset(`${VERIFICATION_CUSTOM_DATASET_PREFIX}${datasetName}`);
+    } else {
+      setDataset(formattedName); // unchanged for other tasks
+    }
+  };
+
+  const handleCustomDatasetChanged = (event: { type: 'created' | 'uploaded' | 'deleted'; datasetName: string }) => {
+    fetchCustomDatasets(); // keep Toolbar's own dropdown list in sync
+    onCustomDatasetChanged?.(event);
   };
 
   const onModelChange = (value: string) => {
@@ -159,7 +187,7 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
 
     // Dataset lists are per-task, so the current dataset stays valid on model
     // change — just re-run batch inference for the new model.
-    const isCurrentCustomDataset = dataset.startsWith('custom:');
+    const isCurrentCustomDataset = dataset.startsWith('custom:') || dataset.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX);
     if (dataset && !isCurrentCustomDataset && dataset !== 'custom' && onBatchInference) {
       onBatchInference(value, dataset);
     }
@@ -168,8 +196,20 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
   const onDatasetChange = (value: string) => {
     setDataset(value);
 
-    // Check if this is a custom dataset (formatted as custom:session_id:dataset_name)
-    const isCustomDataset = value.startsWith('custom:');
+    if (task.id === 'verification') {
+      if (value.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX)) {
+        sessionStorage.setItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY, value.slice(VERIFICATION_CUSTOM_DATASET_PREFIX.length));
+      } else {
+        // Picking the built-in demo (or any non-custom value) clears any
+        // previously saved custom selection, so a refresh doesn't
+        // incorrectly restore a dataset the user just switched away from.
+        sessionStorage.removeItem(VERIFICATION_CUSTOM_DATASET_STORAGE_KEY);
+      }
+    }
+
+    // Check if this is a custom dataset (formatted as custom:session_id:dataset_name
+    // for Transcription/Emotion, or verification-custom:dataset_name for Verification)
+    const isCustomDataset = value.startsWith('custom:') || value.startsWith(VERIFICATION_CUSTOM_DATASET_PREFIX);
 
     // Trigger batch inference when dataset changes (except for custom datasets)
     if (!isCustomDataset && value !== 'custom' && onBatchInference) {
@@ -270,11 +310,16 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
                       <SelectItem disabled value="separator">
                         ── Custom Datasets ──
                       </SelectItem>
-                      {customDatasets.map((customDataset) => (
-                        <SelectItem key={customDataset.formatted_name} value={customDataset.formatted_name}>
-                          {customDataset.dataset_name}
-                        </SelectItem>
-                      ))}
+                      {customDatasets.map((customDataset) => {
+                        const value = task.id === 'verification'
+                          ? `${VERIFICATION_CUSTOM_DATASET_PREFIX}${customDataset.dataset_name}`
+                          : customDataset.formatted_name;
+                        return (
+                          <SelectItem key={customDataset.dataset_name} value={value}>
+                            {customDataset.dataset_name}
+                          </SelectItem>
+                        );
+                      })}
                     </>
                   )}
                 </SelectContent>
@@ -315,6 +360,8 @@ export const Toolbar = ({ task, selectedFile, uploadedFiles, onFileSelect, model
             <CustomDatasetManager
               onDatasetCreated={handleDatasetCreated}
               onDatasetSelected={handleDatasetSelected}
+              onDatasetChanged={task.id === 'verification' ? handleCustomDatasetChanged : undefined}
+              safeMode={task.id === 'verification'}
             />
           )}
 

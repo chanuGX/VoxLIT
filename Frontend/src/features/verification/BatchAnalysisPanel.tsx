@@ -36,7 +36,7 @@ interface BatchAnalysisPanelProps {
 }
 
 const DEFAULT_SALIENCY_SEGMENT_COUNT = 8;
-const isBackendResolvableId = (id: string) => id.startsWith("rec_") || id.startsWith("asset_");
+const isBackendResolvableId = (id: string) => id.startsWith("rec_") || id.startsWith("asset_") || id.startsWith("crec_");
 
 const MIN_BATCH_SIZE = 2;
 const MAX_BATCH_SIZE = 100;
@@ -83,8 +83,13 @@ export const BatchAnalysisPanel = ({
   // clicks never auto-rerun it).
   const autoRunFiredForRef = useRef<string | null>(null);
 
+  // "dataset" mode covers any real dataset selection -- the built-in demo
+  // AND any owned custom dataset -- since /batch/dataset's request body is
+  // already fully generic (just a model + a list of recording ids resolved
+  // server-side); only the legacy bare "custom" sentinel (raw uploads, no
+  // dataset selected) is "upload" mode.
   const inputMode: "dataset" | "upload" | "none" =
-    dataset === "custom" ? "upload" : dataset === VERIFICATION_DEMO_DATASET_ID ? "dataset" : "none";
+    dataset === "custom" ? "upload" : dataset ? "dataset" : "none";
 
   const canRun =
     inputMode !== "none" &&
@@ -208,6 +213,10 @@ export const BatchAnalysisPanel = ({
 
   useEffect(() => {
     if (inputMode !== "dataset" || !canRun) return;
+    // Auto-run is reserved for the built-in demo dataset only -- a newly
+    // selected/loaded custom dataset must never run automatically; the user
+    // explicitly clicks "Run batch analysis" for those.
+    if (dataset !== VERIFICATION_DEMO_DATASET_ID) return;
     const key = `${model}|${dataset}`;
     if (autoRunFiredForRef.current === key) return;
     autoRunFiredForRef.current = key;
@@ -385,7 +394,7 @@ export const BatchAnalysisPanel = ({
     inputMode === "upload"
       ? `${selectedBatchIds.length} uploaded recording${selectedBatchIds.length === 1 ? "" : "s"} selected`
       : inputMode === "dataset"
-        ? `${selectedBatchIds.length} demo recording${selectedBatchIds.length === 1 ? "" : "s"} selected`
+        ? `${selectedBatchIds.length} recording${selectedBatchIds.length === 1 ? "" : "s"} selected`
         : "Select a dataset or upload recordings, then check 2–100 rows in the Audio Dataset panel below.";
 
   return (

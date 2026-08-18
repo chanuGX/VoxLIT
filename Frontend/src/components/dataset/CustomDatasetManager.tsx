@@ -30,10 +30,15 @@ import { API_BASE } from '@/lib/api';
 
 interface CustomDataset {
   dataset_name: string;
-  formatted_name: string;
+  /** Absent in Verification's `safeMode` listing (never returns a
+   *  session-id-embedding formatted name). */
+  formatted_name?: string;
   created_at: string;
-  session_id: string;
-  files: Array<{
+  /** Absent in `safeMode`. */
+  session_id?: string;
+  /** Absent (empty) in `safeMode` -- the safe listing endpoint never
+   *  returns a per-file list, only `total_files`. */
+  files?: Array<{
     filename: string;
     original_filename: string;
     duration: number;
@@ -45,13 +50,27 @@ interface CustomDataset {
 }
 
 interface CustomDatasetManagerProps {
-  onDatasetCreated?: (datasetName: string) => void;
-  onDatasetSelected?: (datasetName: string) => void;
+  /** Called with (formattedName, datasetName) -- formattedName is `''` in
+   *  `safeMode` (never populated by the safe listing endpoint). */
+  onDatasetCreated?: (formattedName: string, datasetName: string) => void;
+  onDatasetSelected?: (formattedName: string, datasetName: string) => void;
+  /** Fired alongside the callbacks above for created/uploaded/deleted
+   *  events, using only already-bare dataset names -- lets a consumer
+   *  (Verification's Toolbar) refresh its own dataset list and reconcile
+   *  derived state without re-deriving anything from a response field. */
+  onDatasetChanged?: (event: { type: "created" | "uploaded" | "deleted"; datasetName: string }) => void;
+  /** When true, lists via the Verification-safe endpoint (no session id,
+   *  no formatted_name, no per-file list) instead of the generic
+   *  GET /upload/dataset/list. Create/upload/delete are unaffected -- they
+   *  already only ever use locally-known bare dataset names. */
+  safeMode?: boolean;
 }
 
 export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
   onDatasetCreated,
-  onDatasetSelected
+  onDatasetSelected,
+  onDatasetChanged,
+  safeMode = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("list");
@@ -74,16 +93,37 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`${API_BASE}/upload/dataset/list`, {
+      const url = safeMode
+        ? `${API_BASE}/tasks/verification/dataset/custom`
+        : `${API_BASE}/upload/dataset/list`;
+      const response = await fetch(url, {
         credentials: 'include'
       });
-      
+
       if (!response.ok) {
         throw new Error(`Failed to fetch datasets: ${response.status}`);
       }
-      
+
       const data = await response.json();
-      setDatasets(data.datasets || []);
+      if (safeMode) {
+        const safeDatasets = (data.datasets || []) as Array<{
+          dataset_name: string;
+          total_files: number;
+          created_at: string | null;
+        }>;
+        setDatasets(
+          safeDatasets.map((d) => ({
+            dataset_name: d.dataset_name,
+            formatted_name: '',
+            created_at: d.created_at ?? '',
+            session_id: '',
+            files: [],
+            total_files: d.total_files,
+          }))
+        );
+      } else {
+        setDatasets(data.datasets || []);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch datasets');
       console.error('Error fetching datasets:', err);
@@ -120,10 +160,13 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
       setNewDatasetName("");
       await fetchDatasets(); // Refresh the list
       setActiveTab("list"); // Switch to list tab
-      
-      if (onDatasetCreated) {
-        onDatasetCreated(data.dataset_name);
-      }
+
+      // `data.dataset_name` is the FORMATTED (session-embedding) string for
+      // this endpoint -- the bare name is `data.original_name`. Callers
+      // that need the bare name (Verification) must use the second
+      // argument, never assume the first one is bare.
+      onDatasetCreated?.(data.dataset_name, data.original_name);
+      onDatasetChanged?.({ type: 'created', datasetName: data.original_name });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create dataset');
       console.error('Error creating dataset:', err);
@@ -181,15 +224,19 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
         };
       });
       setUploadStatus(updatedStatus);
-      
+
       // Clear form
       setSelectedFiles(null);
       if (document.querySelector('input[type="file"]') as HTMLInputElement) {
         (document.querySelector('input[type="file"]') as HTMLInputElement).value = '';
       }
-      
+
       await fetchDatasets(); // Refresh the list
-      
+      // `selectedDataset` is already the bare name the user picked from the
+      // dropdown -- never derived from this response's `dataset_name`
+      // (which is also the formatted string for this endpoint).
+      onDatasetChanged?.({ type: 'uploaded', datasetName: selectedDataset });
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload files');
       console.error('Error uploading files:', err);
@@ -222,16 +269,15 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
       }
       
       await fetchDatasets(); // Refresh the list
+      onDatasetChanged?.({ type: 'deleted', datasetName });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete dataset');
       console.error('Error deleting dataset:', err);
     }
   };
 
-  const selectDataset = (formattedName: string) => {
-    if (onDatasetSelected) {
-      onDatasetSelected(formattedName);
-    }
+  const selectDataset = (formattedName: string, datasetName: string) => {
+    onDatasetSelected?.(formattedName, datasetName);
     setIsOpen(false);
   };
 
@@ -309,7 +355,7 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => selectDataset(dataset.formatted_name)}
+                          onClick={() => selectDataset(dataset.formatted_name ?? '', dataset.dataset_name)}
                         >
                           Select
                         </Button>
@@ -328,35 +374,37 @@ export const CustomDatasetManager: React.FC<CustomDatasetManagerProps> = ({
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <span className="font-medium">Total Duration:</span>{" "}
-                        {dataset.files.reduce((sum, file) => sum + file.duration, 0).toFixed(1)}s
-                      </div>
-                      <div>
-                        <span className="font-medium">Total Size:</span>{" "}
-                        {formatFileSize(dataset.files.reduce((sum, file) => sum + file.size, 0))}
-                      </div>
-                    </div>
-                    
-                    {dataset.files.length > 0 && (
-                      <div className="mt-3">
-                        <p className="text-sm font-medium mb-2">Recent Files:</p>
-                        <div className="space-y-1">
-                          {dataset.files.slice(0, 3).map((file) => (
-                            <div key={file.filename} className="flex items-center gap-2 text-xs text-muted-foreground">
-                              <File className="h-3 w-3" />
-                              <span className="truncate">{file.original_filename}</span>
-                              <span>({file.duration.toFixed(1)}s)</span>
-                            </div>
-                          ))}
-                          {dataset.files.length > 3 && (
-                            <div className="text-xs text-muted-foreground">
-                              ... and {dataset.files.length - 3} more files
-                            </div>
-                          )}
+                    {dataset.files && dataset.files.length > 0 && (
+                      <>
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <span className="font-medium">Total Duration:</span>{" "}
+                            {dataset.files.reduce((sum, file) => sum + file.duration, 0).toFixed(1)}s
+                          </div>
+                          <div>
+                            <span className="font-medium">Total Size:</span>{" "}
+                            {formatFileSize(dataset.files.reduce((sum, file) => sum + file.size, 0))}
+                          </div>
                         </div>
-                      </div>
+
+                        <div className="mt-3">
+                          <p className="text-sm font-medium mb-2">Recent Files:</p>
+                          <div className="space-y-1">
+                            {dataset.files.slice(0, 3).map((file) => (
+                              <div key={file.filename} className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <File className="h-3 w-3" />
+                                <span className="truncate">{file.original_filename}</span>
+                                <span>({file.duration.toFixed(1)}s)</span>
+                              </div>
+                            ))}
+                            {dataset.files.length > 3 && (
+                              <div className="text-xs text-muted-foreground">
+                                ... and {dataset.files.length - 3} more files
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </>
                     )}
                   </CardContent>
                 </Card>
