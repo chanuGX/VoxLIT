@@ -10,6 +10,8 @@ export interface EmbeddingPoint {
   color?: string;
   /** Extra hover line, e.g. "cluster-2 • fit 0.81" (Speaker Verification only). */
   hoverExtra?: string;
+  /** Predicted cluster id, index-aligned with the backend result (Speaker Verification only). */
+  clusterId?: string;
 }
 
 export interface EmbeddingData {
@@ -56,6 +58,11 @@ interface EmbeddingContextType {
    *  already reads. `revision` is stamped internally on every call -- never
    *  supplied by the caller. */
   setEmbeddingDataDirect: (data: Omit<EmbeddingData, 'revision'> | null) => void;
+  /** Predicted cluster currently "focused" for highlighting in the embedding
+   *  graph (Speaker Verification only). Styling-only -- never affects
+   *  embeddingData, clustering, or the projection itself. */
+  focusedClusterId: string | null;
+  setFocusedClusterId: (id: string | null) => void;
 }
 
 const EmbeddingContext = createContext<EmbeddingContextType | undefined>(undefined);
@@ -72,6 +79,7 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [embeddingData, setEmbeddingData] = useState<EmbeddingData | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [focusedClusterId, setFocusedClusterId] = useState<string | null>(null);
   const revisionCounterRef = useRef(0);
 
   // Single path every real publish goes through, so `revision` always gets
@@ -150,6 +158,8 @@ export const EmbeddingProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       fetchEmbeddings,
       clearEmbeddings,
       setEmbeddingDataDirect,
+      focusedClusterId,
+      setFocusedClusterId,
     }}>
       {children}
     </EmbeddingContext.Provider>

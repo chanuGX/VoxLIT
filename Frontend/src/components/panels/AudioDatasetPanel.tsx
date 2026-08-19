@@ -208,14 +208,6 @@ export const AudioDatasetPanel = ({
 
   // Batch inference for entire dataset when model/dataset changes
   useEffect(() => {
-    console.log('DEBUG: Batch inference useEffect triggered', {
-      dataset,
-      model,
-      datasetMetadataLength: datasetMetadata.length,
-      isCustom: dataset === "custom",
-      hasModel: !!model
-    });
-    
     // Skip batch inference for legacy "custom" (uploaded files) but allow for custom datasets
     if (dataset === "custom" || !model) return;
     // Verification has no legacy resultKind/inference concept — never hits /inferences/*.
