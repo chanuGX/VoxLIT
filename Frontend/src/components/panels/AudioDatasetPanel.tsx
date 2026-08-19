@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
 import { BUILTIN_DATASET_IDS, isDeepfakeDemoDataset, isVerificationDemoDataset, VERIFICATION_CUSTOM_DATASET_PREFIX } from '@/tasks/registry';
 
+import type { DatasetRecordingRef } from '@/tasks/types';
 /**
  * Datasets owned by a task rather than by the shared dataset service. They
  * have no `/{dataset}/metadata` route, and their ground-truth labels must not
@@ -22,7 +23,6 @@ const taskOwnedRecordingsPath = (datasetId?: string | null): string | null => {
   if (isDeepfakeDemoDataset(datasetId)) return '/tasks/deepfake/dataset/recordings';
   return null;
 };
-import type { DatasetRecordingRef } from '@/tasks/types';
 
 interface UploadedFile {
   file_id: string;

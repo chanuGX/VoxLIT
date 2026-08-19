@@ -4,6 +4,7 @@ import { TranscriptionResults } from "@/features/transcription/TranscriptionResu
 import { ClassificationResults } from "@/features/emotion/ClassificationResults";
 import { SpeakerVerificationWorkbench } from "@/features/verification";
 import { DiarizationWorkbench } from "@/features/task-b";
+import { DeepfakeWorkbench } from "@/features/deepfake";
 
 /**
  * ─────────────────────────────────────────────────────────────────────────────
@@ -121,18 +122,27 @@ export const TASKS: TaskDefinition[] = [
     },
   },
   {
-    id: "task-c",
-    route: "/tasks/task-c",
-    name: "Voice Task C",
-    shortDescription: "New audio interpretability task — details to be finalized.",
-    status: "placeholder",
-    models: [{ id: "task-c-model-1", label: "Model (to be added)", available: false }],
-    defaultModel: null,
-    datasets: [{ id: "task-c-dataset-1", label: "Dataset (to be added)", available: false }],
-    defaultDataset: null,
-    allowCustomDatasets: true,
+    id: "deepfake",
+    route: "/tasks/deepfake",
+    name: "Audio Deepfake Detection",
+    shortDescription:
+      "Score speech as bona fide or synthetic with three detectors that fail differently — a wav2vec2 XLS-R classifier, a spectrogram transformer, and a dual-column state-space model — against an ASVspoof 2019 LA subset.",
+    status: "active",
+    models: [
+      { id: "xlsr-deepfake", label: "wav2vec2 XLS-R (Model A)", available: true },
+      { id: "ast-fakeaudio", label: "Audio Spectrogram Transformer (Model B)", available: true },
+      { id: "xlsr-mamba", label: "XLSR-Mamba (Model C)", available: true },
+    ],
+    defaultModel: "xlsr-deepfake",
+    // available:true so the toolbar names the dataset actually in use. Like
+    // Speaker Verification's demo set, this dataset has no shared
+    // /{dataset}/metadata route — AudioDatasetPanel special-cases it via
+    // isDeepfakeDemoDataset and lists it from the task's own endpoint instead.
+    datasets: [{ id: "asvspoof2019-la", label: "ASVspoof 2019 LA (subset)", available: true }],
+    defaultDataset: "asvspoof2019-la",
+    allowCustomDatasets: false,
     capabilities: {
-      saliency: false,
+      saliency: true,
       attention: false,
       perturbation: false,
       resultKind: null,
@@ -173,6 +183,16 @@ export const isVerificationDemoDataset = (datasetId?: string | null): boolean =>
  * embeds a raw session id) — Verification's selector never carries a
  * session id anywhere: `verification-custom:<bare dataset name>`.
  */
+/**
+ * The Audio Deepfake Detection demo dataset id. Same constraint as the
+ * Verification demo set above: it has no shared `/{dataset}/metadata` route,
+ * and its bona fide/spoof answers must never reach the browser, so panels
+ * must list it through `/tasks/deepfake/dataset/recordings` instead.
+ */
+export const DEEPFAKE_DEMO_DATASET_ID = "asvspoof2019-la";
+export const isDeepfakeDemoDataset = (datasetId?: string | null): boolean =>
+  datasetId === DEEPFAKE_DEMO_DATASET_ID;
+
 export const VERIFICATION_CUSTOM_DATASET_PREFIX = "verification-custom:";
 
 /** Tab-scoped, session-id-free persistence of the active Verification
@@ -206,5 +226,5 @@ export const TASK_SLOTS: Record<
   emotion: { PredictionResults: ClassificationResults },
   verification: { WorkbenchCenter: SpeakerVerificationWorkbench },
   "task-b": { WorkbenchCenter: DiarizationWorkbench },
-  "task-c": {},
+  deepfake: { WorkbenchCenter: DeepfakeWorkbench },
 };

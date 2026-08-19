@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.core.redis import cache_result, get_result
+# Range-aware audio streaming, already extracted as a shared helper so
+# every task's audio route serves bytes identically. Reused rather than
+# reimplemented -- a plain FileResponse ignores Range, which leaves the
+# browser unable to seek within the clip.
+from app.tasks.verification.audio_streaming import stream_audio_file
 
 from .dataset import (
     DATASET_ID,
@@ -76,18 +80,22 @@ async def dataset_recording(recording_id: str):
 
 @router.get("/dataset/recordings/{recording_id}/audio")
 @router.head("/dataset/recordings/{recording_id}/audio")
-async def dataset_recording_audio(recording_id: str):
+async def dataset_recording_audio(recording_id: str, request: Request):
     """Serve the audio itself so the frontend player can listen to the clip.
 
     HEAD is declared alongside GET because the shared waveform player probes
     the URL with HEAD before loading it; without it that probe returns 405 and
     the player reports the clip as unreachable.
+
+    Streamed through the shared helper so a `Range` header gets a real 206.
+    Without that the browser can load the clip but cannot seek inside it, so
+    clicking the saliency strip to jump to a moment silently does nothing.
     """
     try:
         path = resolve_recording_path(recording_id)
     except (DatasetUnavailable, RecordingNotFound) as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return FileResponse(path, media_type="audio/flac", filename=path.name)
+    return stream_audio_file(path, request, path.name, "audio/flac")
 
 
 class EvaluationRequest(BaseModel):

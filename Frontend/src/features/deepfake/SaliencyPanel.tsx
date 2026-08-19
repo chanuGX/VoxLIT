@@ -29,6 +29,8 @@ export const SaliencyPanel = ({ model, modelLabel, recordingId }: SaliencyPanelP
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [peaks, setPeaks] = useState<number[] | null>(null);
+  // Drives the seek control's announced value (aria-valuenow).
+  const [position, setPosition] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const audioUrl = recordingId
@@ -104,6 +106,7 @@ export const SaliencyPanel = ({ model, modelLabel, recordingId }: SaliencyPanelP
   const verdict = useMemo(() => (result ? readVerdict(result) : null), [result]);
 
   const seekTo = (seconds: number) => {
+    setPosition(seconds);
     const audio = audioRef.current;
     if (!audio) return;
     audio.currentTime = seconds;
@@ -152,10 +155,24 @@ export const SaliencyPanel = ({ model, modelLabel, recordingId }: SaliencyPanelP
             <SaliencyStrip
               result={result}
               peaks={peaks}
+              position={position}
               onSeek={seekTo}
             />
 
-            {audioUrl && <audio ref={audioRef} controls className="w-full" src={audioUrl} />}
+            {audioUrl && (
+              <audio
+                ref={audioRef}
+                controls
+                className="w-full"
+                src={audioUrl}
+                // Only follow the element while it is actually playing. While
+                // paused the keyboard/click seek owns the value, otherwise a
+                // trailing timeupdate immediately overwrites the seek.
+                onTimeUpdate={(event) => {
+                  if (!event.currentTarget.paused) setPosition(event.currentTarget.currentTime);
+                }}
+              />
+            )}
 
             {verdict && (
               <Alert variant={verdict.alarming ? "destructive" : undefined}>
@@ -187,10 +204,12 @@ export const SaliencyPanel = ({ model, modelLabel, recordingId }: SaliencyPanelP
 const SaliencyStrip = ({
   result,
   peaks,
+  position,
   onSeek,
 }: {
   result: DeepfakeSaliency;
   peaks: number[] | null;
+  position: number;
   onSeek: (seconds: number) => void;
 }) => {
   const duration = result.total_duration || 1;
@@ -198,7 +217,33 @@ const SaliencyStrip = ({
 
   return (
     <div className="space-y-1">
-      <div className="w-full overflow-x-auto">
+      {/* The strip is both a picture and a seek control, so the two roles are
+          split: this wrapper is the control (focusable, arrow-key operable,
+          announced as a slider), and the SVG inside stays an image. Without
+          this, seeking was mouse-only. */}
+      <div
+        role="slider"
+        tabIndex={0}
+        aria-label="Seek within the clip"
+        aria-valuemin={0}
+        aria-valuemax={Number(duration.toFixed(2))}
+        aria-valuenow={Number(position.toFixed(2))}
+        aria-valuetext={`${position.toFixed(2)} of ${duration.toFixed(2)} seconds`}
+        onKeyDown={(event) => {
+          const step = event.shiftKey ? 1 : 0.25;
+          const moves: Record<string, number> = {
+            ArrowRight: position + step,
+            ArrowLeft: position - step,
+            Home: 0,
+            End: Math.max(0, duration - 0.05),
+          };
+          const next = moves[event.key];
+          if (next === undefined) return;
+          event.preventDefault();
+          onSeek(Math.min(Math.max(next, 0), duration));
+        }}
+        className="w-full overflow-x-auto rounded-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
         <svg
           viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
           className="h-auto w-full min-w-[340px] cursor-pointer"
@@ -271,7 +316,7 @@ const SaliencyStrip = ({
         </span>
         <span>0.00s</span>
         <span>{duration.toFixed(2)}s</span>
-        <span className="italic">click to play from there</span>
+        <span className="italic">click, or focus and use arrow keys, to play from a point</span>
       </div>
     </div>
   );

@@ -6,8 +6,8 @@
 /Backend/app/tasks/task_a/       @member1
 /Frontend/src/features/task-b/   @member2
 /Backend/app/tasks/task_b/       @member2
-/Frontend/src/features/task-c/   @member3
-/Backend/app/tasks/task_c/       @member3
+/Frontend/src/features/deepfake/ @member3
+/Backend/app/tasks/deepfake/     @member3
 
 # The central registries — review together (small, frequent one-line edits)
 /Frontend/src/tasks/             @member1 @member2 @member3
