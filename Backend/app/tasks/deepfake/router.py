@@ -75,8 +75,14 @@ async def dataset_recording(recording_id: str):
 
 
 @router.get("/dataset/recordings/{recording_id}/audio")
+@router.head("/dataset/recordings/{recording_id}/audio")
 async def dataset_recording_audio(recording_id: str):
-    """Serve the audio itself so the frontend player can listen to the clip."""
+    """Serve the audio itself so the frontend player can listen to the clip.
+
+    HEAD is declared alongside GET because the shared waveform player probes
+    the URL with HEAD before loading it; without it that probe returns 405 and
+    the player reports the clip as unreachable.
+    """
     try:
         path = resolve_recording_path(recording_id)
     except (DatasetUnavailable, RecordingNotFound) as error:

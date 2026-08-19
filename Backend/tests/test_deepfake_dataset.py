@@ -97,11 +97,13 @@ def test_list_recordings_carries_no_label(fake_dataset_dir):
     recordings = [asdict(r) for r in dataset.list_recordings()]
 
     assert len(recordings) == len(FAKE_PROTOCOL)
+    # Exact field set, so a label field cannot be added without this failing.
     assert set(recordings[0]) == {
         "recording_id",
         "display_filename",
         "extension",
         "size_bytes",
+        "duration_seconds",
     }
     _assert_no_ground_truth_leak(recordings)
 

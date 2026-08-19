@@ -44,6 +44,9 @@ class RecordingInfo:
     display_filename: str
     extension: str
     size_bytes: int
+    # None when the header could not be read. The shared Audio Dataset table
+    # renders this column, and without it every row reads "0.00s".
+    duration_seconds: float | None = None
 
 
 def _dataset_root() -> Path:
@@ -73,6 +76,18 @@ def _iter_audio_files(audio_dir: Path):
         yield entry
 
 
+def _read_duration(path: Path) -> float | None:
+    """Clip length from the file header only -- no decoding, no audio read."""
+    import soundfile as sf
+
+    try:
+        info = sf.info(str(path))
+        return round(info.frames / float(info.samplerate), 2)
+    except Exception:
+        # A listing must not fail because one file is unreadable.
+        return None
+
+
 def _discover(audio_dir: Path) -> list[RecordingInfo]:
     recordings: list[RecordingInfo] = []
     for entry in _iter_audio_files(audio_dir):
@@ -82,6 +97,7 @@ def _discover(audio_dir: Path) -> list[RecordingInfo]:
                 display_filename=entry.name,
                 extension=entry.suffix.lower(),
                 size_bytes=entry.stat().st_size,
+                duration_seconds=_read_duration(entry),
             )
         )
     recordings.sort(key=lambda recording: recording.display_filename)

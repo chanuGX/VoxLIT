@@ -868,6 +868,10 @@ export const TaskWorkbench = ({ task }: TaskWorkbenchProps) => {
                 selectedFile={selectedEmbeddingFile}
                 onFileSelect={handleEmbeddingSelection}
                 verificationMode={task.id === 'verification'}
+                // Only Transcription and Emotion run through the legacy
+                // MODEL_FUNCTIONS dispatch that /inferences/embeddings needs;
+                // they are exactly the tasks with a resultKind.
+                legacyEmbeddings={task.capabilities.resultKind !== null}
                 pairSelection={pairSelectionLabels}
                 onPairSelectionChange={setPairSelectionLabels}
                 onReproject={reprojectFn}

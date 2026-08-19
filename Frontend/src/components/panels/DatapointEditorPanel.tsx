@@ -9,6 +9,7 @@ import { WaveformViewer } from "../audio/WaveformViewer";
 import { Play, Pause, RotateCcw, Trash2, Plus, HelpCircle } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { API_BASE } from '@/lib/api';
+import { isDeepfakeDemoDataset } from '@/tasks/registry';
 import { UploadedFile, DatasetRecordingRef, LocalFilePreview } from '@/tasks/types';
 import { verificationAudioUrl } from '@/features/verification/audioUrl';
 
@@ -102,6 +103,20 @@ export const DatapointEditorPanel = ({
     // endpoint — built directly from the id itself, not gated on the
     // recording list lookup succeeding, so playback never becomes hostage
     // to `datasetRecordings` having loaded yet in the same render.
+    // Audio Deepfake Detection also names its demo recordings `rec_<hash>`,
+    // so the prefix alone cannot tell the two tasks apart. Resolve against
+    // the ACTIVE dataset first: while the deepfake dataset is selected a
+    // `rec_` id belongs to it, and its audio lives on its own endpoint.
+    // Checked before the verification branch so that branch is unchanged
+    // for every other case.
+    const activeDataset = originalDataset && originalDataset !== "custom" ? originalDataset : dataset;
+    if (
+      isDeepfakeDemoDataset(activeDataset) &&
+      selectedFile?.file_id?.startsWith('rec_')
+    ) {
+      return `${API_BASE}/tasks/deepfake/dataset/recordings/${encodeURIComponent(selectedFile.file_id)}/audio`;
+    }
+
     if (isVerificationRecordingSelected) {
       return verificationAudioUrl(selectedFile!.file_id);
     }
