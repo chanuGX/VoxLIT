@@ -20,6 +20,8 @@ from .dataset import (
     list_recordings,
     resolve_recording_path,
 )
+from .evaluation import evaluate_dataset
+from .metrics import NotEnoughLabelledData
 from .service import (
     THRESHOLD_VERSION,
     DeepfakeModelUnavailable,
@@ -78,6 +80,35 @@ async def dataset_recording_audio(recording_id: str):
     except (DatasetUnavailable, RecordingNotFound) as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return FileResponse(path, media_type="audio/flac", filename=path.name)
+
+
+class EvaluationRequest(BaseModel):
+    model: str
+
+
+@router.post("/evaluation")
+async def evaluation(request: EvaluationRequest):
+    """Feature 1 — score distributions, DET curve and EER (SRS DF-6..DF-9).
+
+    Aggregates only: no per-recording label is ever returned, so the
+    workbench's read-the-score-then-check-the-protocol exercise survives.
+
+    The first call scores the whole dataset and can take minutes; per-clip
+    scores are cached afterwards, shared with /run.
+    """
+    try:
+        get_model_spec(request.model)
+    except UnsupportedDeepfakeModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    try:
+        return await evaluate_dataset(request.model)
+    except DatasetUnavailable as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except NotEnoughLabelledData as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except DeepfakeModelUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 class RunRequest(BaseModel):
