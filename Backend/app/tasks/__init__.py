@@ -11,8 +11,8 @@ to ACTIVE_TASK_MODULES below and an entry to registry.py. Those two one-line
 edits are the only shared-file changes a new task needs.
 """
 from .router import router  # GET /tasks
-from . import transcription, emotion, verification, task_b, task_c
+from . import transcription, emotion, verification, task_b, deepfake
 
-ACTIVE_TASK_MODULES = [transcription, emotion, verification, task_b, task_c]
+ACTIVE_TASK_MODULES = [transcription, emotion, verification, task_b, deepfake]
 
 __all__ = ["router", "ACTIVE_TASK_MODULES"]

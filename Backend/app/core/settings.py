@@ -52,4 +52,14 @@ class Settings(BaseSettings):
     def speaker_diarization_ami_dataset_dir(self) -> Path:
         return self.SPEAKER_DIARIZATION_DATASET_ROOT / "ami_subset"
 
+
+
+
+    # -----------------------------(Audio Deepfake Detection Settings)-----------------------------
+    DEEPFAKE_DATASET_ROOT: Path = BACKEND_DIR / "data" / "deepfake"
+
+    @property
+    def asvspoof2019_la_dataset_dir(self) -> Path:
+        return self.DEEPFAKE_DATASET_ROOT / "asvspoof2019_la"
+
 settings = Settings()

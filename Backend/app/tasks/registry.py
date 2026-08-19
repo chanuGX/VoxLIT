@@ -41,10 +41,10 @@ TASKS: dict[str, dict] = {
         "models": ["pyannote-3.1"],
         "datasets": ["ami-subset"],
     },
-    "task-c": {
-        "name": "Voice Task C",
-        "status": "placeholder",
-        "models": [],
-        "datasets": [],
+    "deepfake": {
+        "name": "Audio Deepfake Detection",
+        "status": "active",
+        "models": ["xlsr-deepfake"],
+        "datasets": ["asvspoof2019-la"],
     },
 }
