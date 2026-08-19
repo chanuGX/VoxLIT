@@ -35,6 +35,12 @@ DEFAULT_THRESHOLD = 0.5
 THRESHOLD_VERSION = "deepfake-threshold-v0-uncalibrated"
 
 
+# ASTFeatureExtractor builds Kaldi-style fbank frames with a fixed 10 ms hop,
+# so its `max_length` (in frames) converts to seconds at this rate. Used to
+# report the real analysis window instead of the clip's full duration.
+FRAMES_PER_SECOND = 100.0
+
+
 @dataclass(frozen=True, slots=True)
 class DeepfakeModelSpec:
     key: str
@@ -45,6 +51,8 @@ class DeepfakeModelSpec:
     threshold: float
     threshold_calibrated: bool
     recommended: bool
+    # Hugging Face repos that require accepting conditions + an HF_TOKEN.
+    gated: bool = False
 
 
 MODEL_SPECS: dict[str, DeepfakeModelSpec] = {
@@ -62,6 +70,21 @@ MODEL_SPECS: dict[str, DeepfakeModelSpec] = {
         threshold=DEFAULT_THRESHOLD,
         threshold_calibrated=False,
         recommended=True,
+        gated=False,
+    ),
+    # Model B — Audio Spectrogram Transformer. Reads a spectrogram image
+    # rather than the waveform, so it fails differently from Model A; that
+    # contrast is the point of running both. Same Tier A loading path.
+    "ast-fakeaudio": DeepfakeModelSpec(
+        key="ast-fakeaudio",
+        label="Audio Spectrogram Transformer (Model B)",
+        model_id="WpythonW/ast-fakeaudio-detector",
+        revision="main",
+        sampling_rate=TARGET_SAMPLE_RATE,
+        threshold=DEFAULT_THRESHOLD,
+        threshold_calibrated=False,
+        recommended=False,
+        gated=True,
     ),
 }
 
@@ -177,8 +200,49 @@ def _load_waveform(audio_path: str | Path):
 # ---------------------------------------------------------------------------
 
 
+def _analysis_window_seconds(feature_extractor) -> float:
+    """How much audio the model actually looks at, in seconds.
+
+    AST-style extractors pad/truncate to a fixed `max_length` in frames
+    (1024 -> 10.24 s), and do it SILENTLY. Reporting the clip's full duration
+    for those would overstate what the score is based on. Wav2Vec2-style
+    extractors have no such limit, so only our own defensive cap applies.
+    """
+    max_length = getattr(feature_extractor, "max_length", None)
+    is_frame_based = getattr(feature_extractor, "num_mel_bins", None) is not None
+    if max_length and is_frame_based:
+        return min(MAX_ANALYSIS_SECONDS, float(max_length) / FRAMES_PER_SECOND)
+    return MAX_ANALYSIS_SECONDS
+
+
+def _load_failure_message(spec: DeepfakeModelSpec, error: Exception) -> str:
+    """Turn a checkpoint load failure into something actionable.
+
+    A gated repo returns a bare 401 that says nothing about what to do, and
+    it is the most likely failure for Model B.
+    """
+    text = str(error)
+    looks_gated = "gated" in text.lower() or "401" in text or "restricted" in text.lower()
+    if spec.gated or looks_gated:
+        return (
+            f"{spec.model_id} is a gated Hugging Face repo. Accept its "
+            f"conditions at https://huggingface.co/{spec.model_id} with the "
+            "same account, then put HF_TOKEN=<your token> in Backend/.env "
+            "and restart the API. "
+            f"(underlying error: {error})"
+        )
+    return f"Could not load {spec.model_id}: {error}"
+
+
 class _HFAudioClassifierAdapter:
-    """Wraps a standard transformers audio-classification checkpoint."""
+    """Wraps a standard transformers audio-classification checkpoint.
+
+    Deliberately architecture-agnostic: Model A (wav2vec2 XLS-R, raw
+    waveform) and Model B (AST, spectrogram patches) both load and run
+    through this one class, because both are Tier A. The only thing that
+    differs is the analysis window, which is read from the feature extractor
+    rather than assumed.
+    """
 
     def __init__(self, spec: DeepfakeModelSpec) -> None:
         self.spec = spec
@@ -194,17 +258,21 @@ class _HFAudioClassifierAdapter:
                 "Install the backend requirements and restart the API."
             ) from error
 
+        from app.core.settings import settings
+
+        # Only gated repos need a token; sending None keeps anonymous access
+        # working for the public checkpoints.
+        auth = {"token": settings.HF_TOKEN} if settings.HF_TOKEN else {}
+
         try:
             self.feature_extractor = AutoFeatureExtractor.from_pretrained(
-                spec.model_id, revision=spec.revision
+                spec.model_id, revision=spec.revision, **auth
             )
             self.model = AutoModelForAudioClassification.from_pretrained(
-                spec.model_id, revision=spec.revision
+                spec.model_id, revision=spec.revision, **auth
             )
         except Exception as error:
-            raise DeepfakeModelUnavailable(
-                f"Could not load {spec.model_id}: {error}"
-            ) from error
+            raise DeepfakeModelUnavailable(_load_failure_message(spec, error)) from error
 
         self.model.eval()
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -218,6 +286,7 @@ class _HFAudioClassifierAdapter:
         self.bonafide_index = next(
             index for index in self.id2label if index != self.spoof_index
         )
+        self.analysis_window_seconds = _analysis_window_seconds(self.feature_extractor)
 
     def score(self, audio_path: str | Path) -> dict:
         import torch
@@ -225,7 +294,8 @@ class _HFAudioClassifierAdapter:
         waveform, sample_rate = _load_waveform(audio_path)
         duration = waveform.shape[1] / sample_rate
 
-        max_samples = int(MAX_ANALYSIS_SECONDS * sample_rate)
+        window = self.analysis_window_seconds
+        max_samples = int(window * sample_rate)
         truncated = waveform.shape[1] > max_samples
         if truncated:
             waveform = waveform[:, :max_samples]
@@ -251,7 +321,8 @@ class _HFAudioClassifierAdapter:
             "id2label": self.id2label,
             "spoof_index": self.spoof_index,
             "duration": round(duration, 2),
-            "analysed_seconds": round(min(duration, MAX_ANALYSIS_SECONDS), 2),
+            "analysed_seconds": round(min(duration, window), 2),
+            "analysis_window_seconds": round(window, 2),
             "truncated": truncated,
         }
 

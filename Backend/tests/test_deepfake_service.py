@@ -89,6 +89,83 @@ def test_get_model_spec_rejects_unknown_model():
         service.get_model_spec("not-a-model")
 
 
+def test_both_phase_one_models_are_registered():
+    assert set(service.MODEL_SPECS) == {"xlsr-deepfake", "ast-fakeaudio"}
+
+    ast = service.get_model_spec("ast-fakeaudio")
+    assert ast.model_id == "WpythonW/ast-fakeaudio-detector"
+    assert ast.gated is True  # requires accepting conditions + HF_TOKEN
+    assert service.get_model_spec("xlsr-deepfake").gated is False
+
+
+# --- analysis window ------------------------------------------------------
+# AST pads/truncates to a fixed 1024-frame (10.24s) window and does it
+# silently, so the reported `analysed_seconds` must come from the extractor,
+# never from the clip's duration.
+
+
+class _FakeASTExtractor:
+    max_length = 1024
+    num_mel_bins = 128
+
+
+class _FakeWav2Vec2Extractor:
+    """No max_length, no mel bins — consumes whatever it is given."""
+
+
+def test_analysis_window_follows_ast_fixed_input_length():
+    window = service._analysis_window_seconds(_FakeASTExtractor())
+
+    assert window == pytest.approx(10.24)
+
+
+def test_analysis_window_falls_back_to_our_cap_for_waveform_models():
+    window = service._analysis_window_seconds(_FakeWav2Vec2Extractor())
+
+    assert window == service.MAX_ANALYSIS_SECONDS
+
+
+def test_analysis_window_never_exceeds_our_defensive_cap(monkeypatch):
+    """A checkpoint asking for a huge window must not blow past the cap."""
+
+    class _Huge:
+        max_length = 100_000  # 1000 s
+        num_mel_bins = 128
+
+    assert service._analysis_window_seconds(_Huge()) == service.MAX_ANALYSIS_SECONDS
+
+
+# --- load failures --------------------------------------------------------
+
+
+def test_gated_repo_failure_message_is_actionable():
+    spec = service.get_model_spec("ast-fakeaudio")
+
+    message = service._load_failure_message(spec, OSError("401 Client Error"))
+
+    assert "gated" in message.lower()
+    assert "HF_TOKEN" in message
+    assert spec.model_id in message
+
+
+def test_ungated_failure_message_stays_plain():
+    spec = service.get_model_spec("xlsr-deepfake")
+
+    message = service._load_failure_message(spec, OSError("disk on fire"))
+
+    assert "disk on fire" in message
+    assert "HF_TOKEN" not in message
+
+
+def test_a_gated_looking_error_is_detected_even_on_an_ungated_spec():
+    """Repos can become gated after we recorded them as public."""
+    spec = service.get_model_spec("xlsr-deepfake")
+
+    message = service._load_failure_message(spec, OSError("Access to model X is restricted"))
+
+    assert "HF_TOKEN" in message
+
+
 def test_threshold_is_declared_uncalibrated():
     """Until Feature 1 runs an EER sweep, nothing may imply calibration."""
     spec = service.get_model_spec("xlsr-deepfake")

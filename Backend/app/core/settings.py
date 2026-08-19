@@ -5,9 +5,13 @@ from pydantic_settings import BaseSettings
 BACKEND_DIR = Path(__file__).resolve().parents[2]  # .../Backend, absolute
 
 class Settings(BaseSettings):
+    # This block used to sit on a second, identically-named class declared
+    # above this one, which Python immediately shadowed -- so `env_file` was
+    # never in effect and Backend/.env was silently ignored (only real
+    # environment variables were read). Gated Hugging Face models need
+    # HF_TOKEN to arrive from .env, so the two classes are now merged.
     model_config = {"env_file": BACKEND_DIR / ".env", "extra": "ignore"}
 
-class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     SESSION_COOKIE_NAME: str = "sid"
     SESSION_TTL_SECONDS: int = 24 * 60 * 60
