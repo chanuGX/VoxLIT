@@ -18,7 +18,49 @@ export interface ExternalEmbeddingPoint {
   coordinates: number[];
   color: string;
   hoverExtra?: string;
+  clusterId?: string;
 }
+
+// Cluster colors are either "#rrggbb" hex (the 12-color base palette) or an
+// "hsl(h, s%, l%)" string (the golden-angle fallback for cluster index >= 12,
+// see clusterColors.ts) -- blending toward white for cluster-focus dimming
+// must handle both formats.
+const mixWithWhite = (color: string, amount: number): string => {
+  let r: number, g: number, b: number;
+  const hexMatch = /^#([0-9a-f]{6})$/i.exec(color);
+  if (hexMatch) {
+    const hex = hexMatch[1];
+    r = parseInt(hex.slice(0, 2), 16);
+    g = parseInt(hex.slice(2, 4), 16);
+    b = parseInt(hex.slice(4, 6), 16);
+  } else {
+    const hslMatch = /^hsl\(\s*([\d.]+)\s*,\s*([\d.]+)%\s*,\s*([\d.]+)%\s*\)$/i.exec(color);
+    if (!hslMatch) return color;
+    const h = parseFloat(hslMatch[1]) / 360;
+    const s = parseFloat(hslMatch[2]) / 100;
+    const l = parseFloat(hslMatch[3]) / 100;
+    if (s === 0) {
+      r = g = b = Math.round(l * 255);
+    } else {
+      const hue2rgb = (p: number, q: number, t: number) => {
+        let tt = t;
+        if (tt < 0) tt += 1;
+        if (tt > 1) tt -= 1;
+        if (tt < 1 / 6) return p + (q - p) * 6 * tt;
+        if (tt < 1 / 2) return q;
+        if (tt < 2 / 3) return p + (q - p) * (2 / 3 - tt) * 6;
+        return p;
+      };
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = Math.round(hue2rgb(p, q, h + 1 / 3) * 255);
+      g = Math.round(hue2rgb(p, q, h) * 255);
+      b = Math.round(hue2rgb(p, q, h - 1 / 3) * 255);
+    }
+  }
+  const mix = (channel: number) => Math.round(channel + (255 - channel) * amount);
+  return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
+};
 
 interface EmbeddingPlotProps {
   selectedMethod?: string;
@@ -52,7 +94,7 @@ interface EmbeddingPlotContentProps {
 }
 
 const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRangeSelect, selectedFile, selectionMode = 'box', onSelectionChange, externalData, externalSelectedLabels, verificationMode }: EmbeddingPlotContentProps) => {
-  const { embeddingData, isLoading, error } = useEmbedding();
+  const { embeddingData, isLoading, error, focusedClusterId, setFocusedClusterId } = useEmbedding();
   const isExternal = externalData !== undefined;
   const plotRef = useRef<any>(null);
   const [selectedPlane, setSelectedPlane] = useState<PlaneType>('none');
@@ -96,6 +138,13 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       window.removeEventListener('mouseup', rearm);
     };
   }, []);
+
+  // Tracks whether the current mousedown-to-mouseup gesture already hit a
+  // point (and so was already handled by handlePointClick below) -- read by
+  // the empty-space-click-clears-focus effect further down, so a real point
+  // click never also runs through the empty-space path as a second,
+  // redundant decision. Reset at the start of each new gesture.
+  const pointClickedForGestureRef = useRef(false);
 
   // Reduction-method label used for 3D axis titles, plane dropdown labels,
   // plane trace names, and the plane description text -- computed once,
@@ -187,11 +236,19 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       clickGestureHandledRef.current = true;
       const coordinates = is3D ? [point.x, point.y, point.z] : [point.x, point.y];
 
+      // A point click always clears any active cluster focus -- this reuses
+      // Plotly's own hit-testing/gesture-dedup rather than a second
+      // independent heuristic, so there's no threshold to disagree with it.
+      // Also marks this gesture as "already handled" so the empty-space
+      // click-clear effect below skips its own (redundant) decision.
+      pointClickedForGestureRef.current = true;
+      setFocusedClusterId(null);
+
       if (onPointSelect) {
         onPointSelect(label, coordinates);
       }
     }
-  }, [onPointSelect, is3D]);
+  }, [onPointSelect, is3D, setFocusedClusterId]);
 
   // Handle 2D box/lasso selection
   const handleSelection = useCallback((event: any) => {
@@ -497,6 +554,73 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     };
   }, [is3D, fallbackRange2D]);
 
+  // Clear cluster focus on an empty-space click (Speaker Verification only).
+  // A click on an actual point is already handled by handlePointClick above,
+  // via Plotly's own hit-testing -- this only needs to cover the "miss" case,
+  // since there's no Plotly-native "empty space click" event. Registered
+  // capture-phase on mousedown (matching the right-drag-pan listener above)
+  // so it's guaranteed to observe the gesture before Plotly's own SVG/gl3d
+  // handling. The ~8px threshold matches Plotly's own cartesian MINDRAG
+  // constant, so a real click vs. a drag/orbit/box-select/lasso gesture is
+  // judged the same way Plotly itself judges it, not by a second, possibly
+  // disagreeing heuristic.
+  //
+  // The mouseup decision is deferred one tick (setTimeout 0): the raw DOM
+  // mouseup this listener reacts to fires *before* the browser's subsequent
+  // native 'click' event, which is what Plotly's own onClick/plotly_click
+  // (and therefore handlePointClick, and pointClickedForGestureRef) reacts
+  // to -- so at mouseup time we can't yet know whether this gesture hit a
+  // point. Waiting one macrotask lets that synchronous click dispatch
+  // finish first, so pointClickedForGestureRef accurately reflects this
+  // gesture before deciding whether this is a genuine empty-space click.
+  useEffect(() => {
+    if (!isExternal) return;
+    const container = plotContainerRef.current;
+    if (!container) return;
+
+    const CLICK_MOVE_THRESHOLD = 8;
+    let armed = false;
+    let downX = 0;
+    let downY = 0;
+    let pendingTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return; // left button (primary) only -- ignores right-drag panning
+      armed = true;
+      downX = e.clientX;
+      downY = e.clientY;
+      pointClickedForGestureRef.current = false;
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!armed) return;
+      armed = false;
+      const dx = e.clientX - downX;
+      const dy = e.clientY - downY;
+      // Movement beyond the threshold means this gesture was a drag/orbit/
+      // box-select/lasso, never a click -- must not clear focus.
+      if (Math.hypot(dx, dy) > CLICK_MOVE_THRESHOLD) return;
+
+      pendingTimeoutId = setTimeout(() => {
+        pendingTimeoutId = null;
+        if (!pointClickedForGestureRef.current) {
+          setFocusedClusterId(null);
+        }
+      }, 0);
+    };
+
+    container.addEventListener('mousedown', handleMouseDown, true);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      container.removeEventListener('mousedown', handleMouseDown, true);
+      window.removeEventListener('mouseup', handleMouseUp);
+      if (pendingTimeoutId !== null) {
+        clearTimeout(pendingTimeoutId);
+      }
+    };
+  }, [isExternal, setFocusedClusterId]);
+
   // Select points based on angle range - memoized to prevent unnecessary recalculations
   const selectedFiles = useMemo(() => {
     if (!is3D || selectedPlane === 'none' || activePoints.length === 0) {
@@ -554,11 +678,13 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
       return 6; // Default (smaller)
     });
 
-    // Create marker colors based on selection
+    // Create marker colors based on selection. Cluster-focus dimming is
+    // deliberately NOT applied here -- it's applied imperatively via
+    // Plotly.restyle() in a separate effect below, so that toggling focus
+    // never changes this useMemo's output reference (see focusStyles/the
+    // restyle effect further down).
     const markerColors = text.map((filename, index) => {
       if (isExternal) {
-        // Selection gold always wins over the backend-provided cluster color,
-        // matching the existing priority rule below.
         return externalSelectedLabels?.includes(filename) ? '#FFD700' : externalData![index].color;
       }
       if (selectedFile === filename) return '#FFD700'; // Gold for selected file
@@ -570,7 +696,7 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     const hasSelection = isExternal
       ? (externalSelectedLabels?.length ?? 0) > 0
       : selectedFile || selectedByAngle.length > 0;
-    const markerOpacities = text.map(filename => {
+    const markerOpacities = text.map((filename, index) => {
       if (isExternal) {
         return externalSelectedLabels?.includes(filename) ? 1.0 : 0.85;
       }
@@ -697,6 +823,140 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     return result;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isExternal, externalData, externalSelectedLabels, embeddingData, is3D, selectedFile, selectedByAngle, selectedPlane, angleMin, angleMax]);
+
+  // The main scatter/scatter3d trace is always pushed first in the traces
+  // useMemo above, unconditionally, before the origin/connector/plane
+  // traces (which are only sometimes present) -- so it is always index 0.
+  const MAIN_TRACE_INDEX = 0;
+
+  // Cluster-focus marker styling (Speaker Verification only), computed
+  // independently of the `traces` useMemo so that toggling focus never
+  // changes `traces`' own output reference -- applied imperatively via
+  // Plotly.restyle() below instead of by feeding a new `data` prop into
+  // <Plot>. Priority matches the pre-existing selection rule: an
+  // individually/pair-selected point always stays gold and fully visible;
+  // the focused cluster's own points keep their normal color; every other
+  // cluster's points are lightened toward white. Index-aligned with
+  // `externalData` directly (not `text`/`getPlotData()`), since the main
+  // trace's point order for isExternal is exactly `externalData`'s order.
+  const focusStyles = useMemo(() => {
+    if (!isExternal || !externalData) return null;
+    const colors = externalData.map((point) => {
+      if (externalSelectedLabels?.includes(point.label)) return '#FFD700';
+      if (focusedClusterId && point.clusterId !== focusedClusterId) {
+        return mixWithWhite(point.color, 0.7);
+      }
+      return point.color;
+    });
+    const opacities = externalData.map((point) => {
+      if (externalSelectedLabels?.includes(point.label)) return 1.0;
+      if (focusedClusterId && point.clusterId !== focusedClusterId) return 0.55;
+      return 0.85;
+    });
+    return { colors, opacities };
+  }, [isExternal, externalData, externalSelectedLabels, focusedClusterId]);
+
+  // Always mirrors the latest focusStyles into a ref, read by the stable
+  // (never-recreated) applyFocusStyles callback below -- assigned directly
+  // during render (not inside an effect) so it's already current by the
+  // time any effect/lifecycle callback runs after this render commits.
+  const focusStylesRef = useRef(focusStyles);
+  focusStylesRef.current = focusStyles;
+
+  // The actual Plotly graph div, but ONLY once react-plotly.js confirms via
+  // onInitialized/onUpdate that Plotly has genuinely finished creating or
+  // rebuilding it. plotRef.current?.el becomes non-null as soon as the
+  // underlying <div> mounts -- well before Plotly has populated
+  // graphDiv.data -- and restyling against that premature reference is
+  // exactly what crashed the app (Plotly's coerceTraceIndices reading
+  // `.length` off an undefined graphDiv.data). onInitialized/onUpdate fire
+  // strictly after Plotly.react()'s own promise resolves (see
+  // react-plotly.js factory.js: figureCallback runs inside the same
+  // .then() chain as the Plotly.react() call), which is the only reliable
+  // readiness signal.
+  const readyGraphDivRef = useRef<any>(null);
+
+  const arraysEqual = (a: unknown[], b: unknown[]) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  };
+
+  // Applies the latest focus styles to the main trace, but only when the
+  // graph is actually ready for it -- never assumed from a non-null
+  // graphDiv alone. Has a stable identity (reads only refs, no props/state
+  // in its closure) so it's safe to call from onInitialized/onUpdate/the
+  // toggle effect below without ever having to recreate any of them.
+  //
+  // react-plotly.js also listens for Plotly's own 'plotly_restyle' DOM
+  // event (among others) and re-invokes onUpdate whenever it fires --
+  // including for a restyle THIS function itself just issued, not only
+  // ones caused by a genuine Plotly.react() redraw. Comparing the trace's
+  // current marker.color/opacity against the styles about to be applied,
+  // and bailing out when they already match, is what breaks that loop --
+  // robust regardless of exactly when the DOM event fires relative to the
+  // restyle promise resolving, unlike a timing-based "in-flight" flag would be.
+  const applyFocusStyles = useCallback((graphDiv: any) => {
+    const styles = focusStylesRef.current;
+    if (!graphDiv || !styles) return;
+    if (!Array.isArray(graphDiv.data) || graphDiv.data.length <= MAIN_TRACE_INDEX) return;
+
+    const mainTrace = graphDiv.data[MAIN_TRACE_INDEX];
+    const pointCount = Array.isArray(mainTrace?.x) ? mainTrace.x.length : undefined;
+    if (pointCount === undefined || styles.colors.length !== pointCount || styles.opacities.length !== pointCount) {
+      return;
+    }
+
+    const currentColors = mainTrace?.marker?.color;
+    const currentOpacities = mainTrace?.marker?.opacity;
+    if (
+      Array.isArray(currentColors) &&
+      Array.isArray(currentOpacities) &&
+      arraysEqual(currentColors, styles.colors) &&
+      arraysEqual(currentOpacities, styles.opacities)
+    ) {
+      return; // Already showing these exact styles.
+    }
+
+    Plotly.restyle(
+      graphDiv,
+      {
+        'marker.color': [styles.colors],
+        'marker.opacity': [styles.opacities],
+      },
+      [MAIN_TRACE_INDEX]
+    ).catch((err: unknown) => {
+      console.error('Cluster-focus marker restyle failed:', err);
+    });
+  }, []);
+
+  const handlePlotInitialized = useCallback((_figure: any, graphDiv: any) => {
+    readyGraphDivRef.current = graphDiv;
+    applyFocusStyles(graphDiv);
+  }, [applyFocusStyles]);
+
+  // Reapplies focus styles after every Plotly.react()-driven redraw (e.g. a
+  // genuinely new batch/projection, or an is3D toggle) -- traces never
+  // encodes focus lightening itself (see focusStyles above), so any redraw
+  // that rebuilds the main trace resets its colors back to the
+  // selection-only base and needs focus reapplied on top.
+  const handlePlotUpdate = useCallback((_figure: any, graphDiv: any) => {
+    readyGraphDivRef.current = graphDiv;
+    applyFocusStyles(graphDiv);
+  }, [applyFocusStyles]);
+
+  const handlePlotPurge = useCallback(() => {
+    readyGraphDivRef.current = null;
+  }, []);
+
+  // Normal cluster-focus toggles (clicking a cluster card, clearing focus)
+  // -- never calls Plotly.react()/setEmbeddingDataDirect/a reprojection
+  // request, only restyle() via applyFocusStyles.
+  useEffect(() => {
+    applyFocusStyles(readyGraphDivRef.current);
+  }, [focusStyles, applyFocusStyles]);
 
   const layout = useMemo(() => {
     // Layout configuration
@@ -840,6 +1100,30 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [is3D, selectedPlane, selectionMode, selectedMethod, embeddingData, isExternal, externalData, revisionKey, methodLabel, didResetViewThisRender]);
 
+  // Memoized so a focus-only rerender (which changes neither the reduction
+  // method, dimensionality, nor the selected plane) doesn't hand <Plot> a
+  // new config object reference -- react-plotly.js diffs data/layout/config
+  // props to decide whether to call Plotly.react().
+  const plotConfig = useMemo(
+    () => ({
+      displayModeBar: false, // Hide the mode bar completely
+      displaylogo: false,
+      responsive: true,
+      autosizable: true,
+      scrollZoom: true,
+      doubleClick: 'reset+autosize' as const,
+      showTips: false, // Hide hover tips
+      toImageButtonOptions: {
+        format: 'png' as const,
+        filename: `embeddings_${selectedMethod}_${is3D ? '3D' : '2D'}${selectedPlane !== 'none' ? `_${selectedPlane}` : ''}`,
+        height: 800,
+        width: 800,
+        scale: 2
+      }
+    }),
+    [selectedMethod, is3D, selectedPlane]
+  );
+
   if (verificationMode && !isExternal) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -963,22 +1247,10 @@ const EmbeddingPlotContent = ({ selectedMethod, is3D, onPointSelect, onAngleRang
         onClick={handlePointClick}
         onSelected={handleSelection}
         onDeselect={handleDeselect}
-        config={{
-          displayModeBar: false, // Hide the mode bar completely
-          displaylogo: false,
-          responsive: true,
-          autosizable: true,
-          scrollZoom: true,
-          doubleClick: 'reset+autosize',
-          showTips: false, // Hide hover tips,
-          toImageButtonOptions: {
-            format: 'png',
-            filename: `embeddings_${selectedMethod}_${is3D ? '3D' : '2D'}${selectedPlane !== 'none' ? `_${selectedPlane}` : ''}`,
-            height: 800,
-            width: 800,
-            scale: 2
-          }
-        }}
+        onInitialized={handlePlotInitialized}
+        onUpdate={handlePlotUpdate}
+        onPurge={handlePlotPurge}
+        config={plotConfig}
         style={{ width: '100%', height: '100%' }}
         useResizeHandler={true}
       />

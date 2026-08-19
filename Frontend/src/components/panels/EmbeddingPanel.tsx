@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -137,6 +137,27 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const { embeddingData, isLoading, error, fetchEmbeddings, clearEmbeddings } = useEmbedding();
+
+  // Memoized so a context change that leaves embeddingData itself untouched
+  // (e.g. focusedClusterId toggling in EmbeddingContext, which still causes
+  // every useEmbedding() consumer to re-render since the context's own
+  // value object is rebuilt on every provider render) doesn't hand
+  // EmbeddingPlot a new externalData array reference -- that reference is
+  // one of the traces useMemo's own dependencies there, so an unstable
+  // reference here would cascade into an unnecessary Plotly.react() and,
+  // via a subtle interaction with uirevision, an occasional 2D range reset.
+  const externalData = useMemo<ExternalEmbeddingPoint[] | undefined>(() => {
+    if (!verificationMode || !embeddingData?.reduced_embeddings) {
+      return undefined;
+    }
+    return embeddingData.reduced_embeddings.map((p): ExternalEmbeddingPoint => ({
+      label: p.filename,
+      coordinates: p.coordinates,
+      color: p.color ?? '#3b82f6',
+      hoverExtra: p.hoverExtra,
+      clusterId: p.clusterId,
+    }));
+  }, [verificationMode, embeddingData]);
 
   // Get available analysis types based on the task's batch-analysis capability
   const getAvailableAnalysisTypes = () => {
@@ -655,16 +676,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               selectedFile={selectedFile}
               selectionMode={selectionMode}
               onSelectionChange={handle2DSelectionChange}
-              externalData={
-                verificationMode && embeddingData?.reduced_embeddings
-                  ? embeddingData.reduced_embeddings.map((p): ExternalEmbeddingPoint => ({
-                      label: p.filename,
-                      coordinates: p.coordinates,
-                      color: p.color ?? '#3b82f6',
-                      hoverExtra: p.hoverExtra,
-                    }))
-                  : undefined
-              }
+              externalData={externalData}
               externalSelectedLabels={verificationMode ? pairSelection : undefined}
               verificationMode={verificationMode}
             />

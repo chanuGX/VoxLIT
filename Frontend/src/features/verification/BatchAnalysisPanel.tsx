@@ -55,7 +55,7 @@ export const BatchAnalysisPanel = ({
   onReprojectHandlerChange,
   onLabelResolverChange,
 }: BatchAnalysisPanelProps) => {
-  const { setEmbeddingDataDirect } = useEmbedding();
+  const { setEmbeddingDataDirect, focusedClusterId, setFocusedClusterId } = useEmbedding();
 
   const [batchResult, setBatchResult] = useState<BatchAnalysisResponse | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
@@ -120,6 +120,7 @@ export const BatchAnalysisPanel = ({
     setProjectionError(null);
     setSubmittedIds([]);
     setEmbeddingDataDirect(null);
+    setFocusedClusterId(null);
     setSaliencyResult(null);
     setSaliencyError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -168,6 +169,7 @@ export const BatchAnalysisPanel = ({
     setBatchResult(null);
     setProjectionError(null);
     setEmbeddingDataDirect(null);
+    setFocusedClusterId(null);
 
     try {
       let response: Response;
@@ -276,6 +278,7 @@ export const BatchAnalysisPanel = ({
             coordinates: projection.coordinates[i],
             color: clusterColorMap[batchResult.cluster_labels[i]] ?? "#3b82f6",
             hoverExtra: `${batchResult.cluster_labels[i]} • fit ${batchResult.cluster_fit_scores[i].toFixed(2)}`,
+            clusterId: batchResult.cluster_labels[i],
           })),
         });
       } catch (caught) {
@@ -431,7 +434,12 @@ export const BatchAnalysisPanel = ({
       {batchResult && (
         <>
           <PairComparisonCard selectedLabels={pairSelection} batchResult={batchResult} labelToIndex={labelToIndex} />
-          <ClusterSummaryList clusterSummaries={batchResult.cluster_summaries} clusterColorMap={clusterColorMap} />
+          <ClusterSummaryList
+            clusterSummaries={batchResult.cluster_summaries}
+            clusterColorMap={clusterColorMap}
+            focusedClusterId={focusedClusterId}
+            onClusterFocusChange={setFocusedClusterId}
+          />
         </>
       )}
 
