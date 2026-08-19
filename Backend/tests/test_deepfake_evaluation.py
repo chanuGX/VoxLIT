@@ -1,4 +1,4 @@
-"""Feature 1 endpoint tests — POST /tasks/deepfake/evaluation.
+"""Feature 1 endpoint tests — POST /tasks/deepfake/scores.
 
 `run_detection` is stubbed throughout: these test the aggregation, the
 error mapping, the cache sharing with /run, and above all that the view
@@ -66,7 +66,7 @@ def stub_scoring(monkeypatch):
 
 async def test_evaluation_reports_eer_and_counts(client, labelled_dataset, stub_scoring):
     response = await client.post(
-        "/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"}
+        "/tasks/deepfake/scores", json={"model": "xlsr-deepfake"}
     )
 
     assert response.status_code == 200
@@ -84,7 +84,7 @@ async def test_evaluation_returns_two_distributions_on_a_common_axis(
 ):
     """SRS DF-6."""
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     bonafide = payload["distributions"]["bonafide"]
@@ -102,7 +102,7 @@ async def test_evaluation_returns_a_det_curve_spanning_all_thresholds(
 ):
     """SRS DF-7."""
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     curve = payload["det_curve"]
@@ -115,7 +115,7 @@ async def test_evaluation_returns_a_det_curve_spanning_all_thresholds(
 async def test_threshold_is_reported_with_its_dataset(client, labelled_dataset, stub_scoring):
     """SRS DF-9 — thresholds do not transfer between datasets."""
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     assert payload["dataset_id"] == "asvspoof2019-la"
@@ -127,7 +127,7 @@ async def test_operating_point_shows_what_the_shipped_threshold_costs(
     client, labelled_dataset, stub_scoring
 ):
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     operating = payload["operating_point"]
@@ -146,7 +146,7 @@ async def test_evaluation_never_returns_a_per_recording_label(
     Aggregates are fine; a file-id-to-answer mapping would give the game away.
     """
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     body = json.dumps(payload)
@@ -156,7 +156,7 @@ async def test_evaluation_never_returns_a_per_recording_label(
 
 
 async def test_evaluation_rejects_an_unknown_model(client, labelled_dataset):
-    response = await client.post("/tasks/deepfake/evaluation", json={"model": "nope"})
+    response = await client.post("/tasks/deepfake/scores", json={"model": "nope"})
 
     assert response.status_code == 400
 
@@ -172,7 +172,7 @@ async def test_evaluation_needs_both_classes(client, monkeypatch, tmp_path, stub
     )
 
     response = await client.post(
-        "/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"}
+        "/tasks/deepfake/scores", json={"model": "xlsr-deepfake"}
     )
 
     assert response.status_code == 422
@@ -182,7 +182,7 @@ async def test_evaluation_reports_mean_score_per_attack(
     client, labelled_dataset, stub_scoring
 ):
     payload = (
-        await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+        await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     ).json()
 
     by_attack = {row["attack"]: row for row in payload["per_attack"]}
@@ -197,11 +197,11 @@ async def test_evaluation_reuses_cached_scores_on_a_second_run(
     client, labelled_dataset, stub_scoring
 ):
     """The second pass must not re-run inference for clips already scored."""
-    await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+    await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
     first_pass = len(stub_scoring)
     stub_scoring.clear()
 
-    await client.post("/tasks/deepfake/evaluation", json={"model": "xlsr-deepfake"})
+    await client.post("/tasks/deepfake/scores", json={"model": "xlsr-deepfake"})
 
     assert first_pass == len(PROTOCOL)
     assert stub_scoring == []

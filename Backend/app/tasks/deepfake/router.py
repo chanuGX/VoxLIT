@@ -21,6 +21,7 @@ from .dataset import (
     resolve_recording_path,
 )
 from .evaluation import evaluate_dataset
+from .silence_probe import SILENCE_TOP_DB, run_silence_probe
 from .metrics import NotEnoughLabelledData
 from .service import (
     THRESHOLD_VERSION,
@@ -86,7 +87,7 @@ class EvaluationRequest(BaseModel):
     model: str
 
 
-@router.post("/evaluation")
+@router.post("/scores")
 async def evaluation(request: EvaluationRequest):
     """Feature 1 — score distributions, DET curve and EER (SRS DF-6..DF-9).
 
@@ -109,6 +110,46 @@ async def evaluation(request: EvaluationRequest):
         raise HTTPException(status_code=422, detail=str(error)) from error
     except DeepfakeModelUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+class SilenceProbeRequest(BaseModel):
+    model: str
+    recording_id: str
+
+
+@router.post("/silence-probe")
+async def silence_probe(request: SilenceProbeRequest):
+    """Feature 2 — score the clip as submitted, trimmed, and silence-only.
+
+    SRS DF-10..DF-12. Three forward passes on one clip: no dataset, no
+    labels, no gradients. Cached on the model, the silence threshold and the
+    file's content hash, so re-opening the card is free.
+    """
+    try:
+        get_model_spec(request.model)
+    except UnsupportedDeepfakeModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        path = resolve_recording_path(request.recording_id)
+    except (DatasetUnavailable, RecordingNotFound) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    audio_hash = await run_in_threadpool(file_sha256, path)
+    cache_model_key = f"df-silence:{request.model}:{THRESHOLD_VERSION}:{SILENCE_TOP_DB}"
+
+    cached = await get_result(cache_model_key, audio_hash)
+    if cached is not None:
+        return {**cached, "recording_id": request.recording_id, "cached": True}
+
+    try:
+        payload = await run_in_threadpool(run_silence_probe, request.model, path)
+    except DeepfakeModelUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    await cache_result(cache_model_key, audio_hash, payload, ttl=CACHE_TTL_SECONDS)
+    return {**payload, "recording_id": request.recording_id, "cached": False}
 
 
 class RunRequest(BaseModel):
