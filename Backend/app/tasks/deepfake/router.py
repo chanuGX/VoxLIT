@@ -21,6 +21,7 @@ from .dataset import (
     resolve_recording_path,
 )
 from .evaluation import evaluate_dataset
+from .saliency import METHOD as SALIENCY_METHOD, SaliencyUnavailable, generate_saliency
 from .silence_probe import SILENCE_TOP_DB, run_silence_probe
 from .metrics import NotEnoughLabelledData
 from .service import (
@@ -146,6 +147,46 @@ async def silence_probe(request: SilenceProbeRequest):
     except DeepfakeModelUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
     except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    await cache_result(cache_model_key, audio_hash, payload, ttl=CACHE_TTL_SECONDS)
+    return {**payload, "recording_id": request.recording_id, "cached": False}
+
+
+class SaliencyRequest(BaseModel):
+    model: str
+    recording_id: str
+
+
+@router.post("/saliency")
+async def saliency(request: SaliencyRequest):
+    """Feature 3 — waveform-aligned temporal attribution (SRS DF-14, DF-15).
+
+    One forward and one backward pass over a single clip. Emits the shared
+    saliency service's response contract so the payload is interchangeable
+    with its visualisation.
+    """
+    try:
+        get_model_spec(request.model)
+    except UnsupportedDeepfakeModel as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        path = resolve_recording_path(request.recording_id)
+    except (DatasetUnavailable, RecordingNotFound) as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    audio_hash = await run_in_threadpool(file_sha256, path)
+    cache_model_key = f"df-saliency:{request.model}:{SALIENCY_METHOD}"
+
+    cached = await get_result(cache_model_key, audio_hash)
+    if cached is not None:
+        return {**cached, "recording_id": request.recording_id, "cached": True}
+
+    try:
+        payload = await run_in_threadpool(generate_saliency, request.model, path)
+    except DeepfakeModelUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except SaliencyUnavailable as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
     await cache_result(cache_model_key, audio_hash, payload, ttl=CACHE_TTL_SECONDS)
