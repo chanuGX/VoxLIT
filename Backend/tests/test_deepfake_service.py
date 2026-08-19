@@ -89,8 +89,9 @@ def test_get_model_spec_rejects_unknown_model():
         service.get_model_spec("not-a-model")
 
 
-def test_both_phase_one_models_are_registered():
-    assert set(service.MODEL_SPECS) == {"xlsr-deepfake", "ast-fakeaudio"}
+def test_phase_one_tier_a_models_are_registered():
+    """Model C is asserted separately in test_deepfake_xlsr_mamba.py."""
+    assert {"xlsr-deepfake", "ast-fakeaudio"} <= set(service.MODEL_SPECS)
 
     ast = service.get_model_spec("ast-fakeaudio")
     assert ast.model_id == "WpythonW/ast-fakeaudio-detector"

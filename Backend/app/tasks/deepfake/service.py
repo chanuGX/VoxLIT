@@ -53,6 +53,10 @@ class DeepfakeModelSpec:
     recommended: bool
     # Hugging Face repos that require accepting conditions + an HF_TOKEN.
     gated: bool = False
+    # "A" = self-describing checkpoint, loads through the shared transformers
+    # path. "B" = weights only, needs architecture code we maintain ourselves
+    # (see xlsr_mamba.py). Decides which adapter get_model builds.
+    tier: str = "A"
 
 
 MODEL_SPECS: dict[str, DeepfakeModelSpec] = {
@@ -85,6 +89,24 @@ MODEL_SPECS: dict[str, DeepfakeModelSpec] = {
         threshold_calibrated=False,
         recommended=False,
         gated=True,
+        tier="A",
+    ),
+    # Model C — XLSR-Mamba (Xiao & Das, IEEE SPL 2025). Tier B: the repo ships
+    # weights and an EMPTY config.json, so the architecture lives in our own
+    # xlsr_mamba.py. Runs on CPU because the selective scan is reimplemented
+    # in pure PyTorch — the official mamba-ssm CUDA kernels cannot be built
+    # or run on this platform.
+    "xlsr-mamba": DeepfakeModelSpec(
+        key="xlsr-mamba",
+        label="XLSR-Mamba (Model C)",
+        model_id="AustinXiao/XLSR-Mamba-LA",
+        revision="main",
+        sampling_rate=TARGET_SAMPLE_RATE,
+        threshold=DEFAULT_THRESHOLD,
+        threshold_calibrated=False,
+        recommended=False,
+        gated=False,
+        tier="B",
     ),
 }
 
@@ -327,6 +349,69 @@ class _HFAudioClassifierAdapter:
         }
 
 
+class _XLSRMambaAdapter:
+    """Tier B adapter for Model C.
+
+    Same `score()` contract as the Tier A adapter, but everything the
+    transformers checkpoint would have described is supplied by us: the
+    architecture (xlsr_mamba.XLSRMamba), the preprocessing (tile-pad to
+    66800 samples, no normalisation) and the label order.
+    """
+
+    def __init__(self, spec: DeepfakeModelSpec) -> None:
+        from app.core.settings import settings
+
+        from . import xlsr_mamba
+
+        self.spec = spec
+        self._xlsr_mamba = xlsr_mamba
+        try:
+            self.model = xlsr_mamba.load_xlsr_mamba(
+                spec.model_id, revision=spec.revision, token=settings.HF_TOKEN
+            )
+        except Exception as error:
+            raise DeepfakeModelUnavailable(_load_failure_message(spec, error)) from error
+
+        # NOT read from the checkpoint: its config.json is empty. Taken from
+        # the reference training code, where genSpoof_list labels bona fide
+        # as 1 and produce_evaluation_file scores with batch_out[:, 1].
+        self.spoof_index = xlsr_mamba.SPOOF_INDEX
+        self.bonafide_index = xlsr_mamba.BONAFIDE_INDEX
+        self.id2label = {self.spoof_index: "spoof", self.bonafide_index: "bonafide"}
+        self.analysis_window_seconds = (
+            xlsr_mamba.EVAL_CUT_SAMPLES / float(spec.sampling_rate)
+        )
+
+    def score(self, audio_path: str | Path) -> dict:
+        import torch
+
+        waveform, sample_rate = _load_waveform(audio_path)
+        duration = waveform.shape[1] / sample_rate
+        truncated = waveform.shape[1] > self._xlsr_mamba.EVAL_CUT_SAMPLES
+
+        # Tile-repeat short clips rather than zero-padding them — the
+        # reference does this, and zero padding scores differently.
+        prepared = self._xlsr_mamba.pad_or_tile(waveform.squeeze(0).numpy())
+        batch = torch.from_numpy(prepared).float().unsqueeze(0)
+
+        with torch.inference_mode():
+            logits = self.model(batch)
+
+        probabilities = torch.softmax(logits, dim=-1).squeeze(0)
+
+        return {
+            "spoof_probability": round(float(probabilities[self.spoof_index]), 6),
+            "bonafide_probability": round(float(probabilities[self.bonafide_index]), 6),
+            "logits": [round(v, 6) for v in logits.squeeze(0).tolist()],
+            "id2label": self.id2label,
+            "spoof_index": self.spoof_index,
+            "duration": round(duration, 2),
+            "analysed_seconds": round(min(duration, self.analysis_window_seconds), 2),
+            "analysis_window_seconds": round(self.analysis_window_seconds, 2),
+            "truncated": truncated,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Cache + public API
 # ---------------------------------------------------------------------------
@@ -354,7 +439,10 @@ def get_model(model_key: str) -> DeepfakeAdapter:
     spec = get_model_spec(model_key)
     with _LOAD_LOCK:
         if model_key not in _MODEL_CACHE:
-            _MODEL_CACHE[model_key] = _HFAudioClassifierAdapter(spec)
+            builder = (
+                _XLSRMambaAdapter if spec.tier == "B" else _HFAudioClassifierAdapter
+            )
+            _MODEL_CACHE[model_key] = builder(spec)
         return _MODEL_CACHE[model_key]
 
 
