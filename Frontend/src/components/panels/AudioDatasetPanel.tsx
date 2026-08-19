@@ -9,8 +9,20 @@ import { AudioUploader } from "../audio/AudioUploader";
 import { AudioDataTable } from "../audio/AudioDataTable";
 import { toast } from "sonner";
 import { API_BASE } from '@/lib/api';
-import { BUILTIN_DATASET_IDS, isVerificationDemoDataset, VERIFICATION_CUSTOM_DATASET_PREFIX } from '@/tasks/registry';
+import { BUILTIN_DATASET_IDS, isDeepfakeDemoDataset, isVerificationDemoDataset, VERIFICATION_CUSTOM_DATASET_PREFIX } from '@/tasks/registry';
+
 import type { DatasetRecordingRef } from '@/tasks/types';
+/**
+ * Datasets owned by a task rather than by the shared dataset service. They
+ * have no `/{dataset}/metadata` route, and their ground-truth labels must not
+ * reach the browser, so they are listed from the task's own recordings
+ * endpoint (opaque ids only).
+ */
+const taskOwnedRecordingsPath = (datasetId?: string | null): string | null => {
+  if (isVerificationDemoDataset(datasetId)) return '/tasks/verification/dataset/recordings';
+  if (isDeepfakeDemoDataset(datasetId)) return '/tasks/deepfake/dataset/recordings';
+  return null;
+};
 
 interface UploadedFile {
   file_id: string;
@@ -218,8 +230,9 @@ export const AudioDatasetPanel = ({
     
     // Skip batch inference for legacy "custom" (uploaded files) but allow for custom datasets
     if (dataset === "custom" || !model) return;
-    // Verification has no legacy resultKind/inference concept — never hits /inferences/*.
-    if (isVerificationDemoDataset(originalDataset || dataset)) return;
+    // Neither Verification nor Deepfake has a legacy resultKind/inference
+    // concept — they never hit /inferences/*.
+    if (taskOwnedRecordingsPath(originalDataset || dataset)) return;
     if (datasetMetadata.length === 0) return;
     
     const datasetToUse = originalDataset || dataset;
@@ -505,9 +518,10 @@ export const AudioDatasetPanel = ({
       return;
     }
 
-    if (isVerificationDemoDataset(datasetToUse)) {
+    const reloadPath = taskOwnedRecordingsPath(datasetToUse);
+    if (reloadPath) {
       try {
-        const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { credentials: 'include' });
+        const res = await fetch(`${API_BASE}${reloadPath}`, { credentials: 'include' });
         if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
         const data = await res.json() as { recordings: DatasetRecordingRef[] };
         const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds }));
@@ -575,14 +589,15 @@ export const AudioDatasetPanel = ({
       return;
     }
 
-    // Speaker Verification's demo dataset is never safe to list via the
-    // generic /{dataset}/metadata route (ground-truth risk) — always use the
+    // A task-owned demo dataset is never safe to list via the generic
+    // /{dataset}/metadata route (ground-truth risk) — always use the
     // task-specific, opaque-id-only endpoint instead.
-    if (isVerificationDemoDataset(datasetToUse)) {
+    const recordingsPath = taskOwnedRecordingsPath(datasetToUse);
+    if (recordingsPath) {
       const ac = new AbortController();
       (async () => {
         try {
-          const res = await fetch(`${API_BASE}/tasks/verification/dataset/recordings`, { signal: ac.signal, credentials: 'include' });
+          const res = await fetch(`${API_BASE}${recordingsPath}`, { signal: ac.signal, credentials: 'include' });
           if (!res.ok) throw new Error(`Failed to fetch demo dataset: ${res.status}`);
           const data = await res.json() as { recordings: DatasetRecordingRef[] };
           const rows = data.recordings.map(r => ({ id: r.recording_id, filename: r.display_filename, extension: r.extension, size_bytes: r.size_bytes, duration_seconds: r.duration_seconds }));

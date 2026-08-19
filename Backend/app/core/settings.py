@@ -5,9 +5,13 @@ from pydantic_settings import BaseSettings
 BACKEND_DIR = Path(__file__).resolve().parents[2]  # .../Backend, absolute
 
 class Settings(BaseSettings):
+    # This block used to sit on a second, identically-named class declared
+    # above this one, which Python immediately shadowed -- so `env_file` was
+    # never in effect and Backend/.env was silently ignored (only real
+    # environment variables were read). Gated Hugging Face models need
+    # HF_TOKEN to arrive from .env, so the two classes are now merged.
     model_config = {"env_file": BACKEND_DIR / ".env", "extra": "ignore"}
 
-class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     SESSION_COOKIE_NAME: str = "sid"
     SESSION_TTL_SECONDS: int = 24 * 60 * 60
@@ -51,5 +55,15 @@ class Settings(BaseSettings):
     @property
     def speaker_diarization_ami_dataset_dir(self) -> Path:
         return self.SPEAKER_DIARIZATION_DATASET_ROOT / "ami_subset"
+
+
+
+
+    # -----------------------------(Audio Deepfake Detection Settings)-----------------------------
+    DEEPFAKE_DATASET_ROOT: Path = BACKEND_DIR / "data" / "deepfake"
+
+    @property
+    def asvspoof2019_la_dataset_dir(self) -> Path:
+        return self.DEEPFAKE_DATASET_ROOT / "asvspoof2019_la"
 
 settings = Settings()

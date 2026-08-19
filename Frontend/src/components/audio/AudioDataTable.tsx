@@ -14,6 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Play, ChevronLeft, ChevronRight } from "lucide-react";
 import { useMemo, useCallback, useEffect } from "react";
 import { toast } from "sonner";
+import { isDeepfakeDemoDataset } from "@/tasks/registry";
 
 interface UploadedFile {
   file_id: string;
@@ -374,7 +375,11 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
           return <span className="font-mono text-xs">{filename}</span>;
         },
       },
-      {
+      // The prediction column is driven by the legacy /inferences/* dispatch.
+      // Audio Deepfake Detection scores through its own endpoint and never
+      // fills predictionMap, so for that dataset the column would be both
+      // permanently empty and mislabelled ("Predicted Emotion").
+      ...(isDeepfakeDemoDataset(dataset) ? [] : [{
         id: "prediction",
         header: model.startsWith("whisper") ? "Predicted Transcript" : "Predicted Emotion",
         cell: ({ row }) => {
@@ -399,7 +404,7 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
               
           return <span className="text-xs">{predictionText || <span className="text-gray-400">No prediction</span>}</span>;
         },
-      },
+      }]),
     ];
 
     // Add ground truth column only if applicable for this model-dataset combination
@@ -422,13 +427,18 @@ export const AudioDataTable = ({ selectedRow, onRowSelect, searchQuery, apiData,
       header: "Duration",
       cell: ({ row }) => {
         const data = row.original as DatasetRow;
-        const d = Number(getFrom(data, ["duration"], "0"));
+        // Task-owned dataset listings name this field duration_seconds; the
+        // legacy shared listings name it duration. Without the fallback every
+        // row of a task-owned dataset reads "0.00s".
+        const raw = getFrom(data, ["duration", "duration_seconds"], "");
+        if (raw === "") return <span className="text-xs text-muted-foreground">—</span>;
+        const d = Number(raw);
         return <span className="text-xs">{isNaN(d) ? "" : `${d.toFixed(2)}s`}</span>;
       },
     });
 
     return baseColumns;
-  }, [getFrom, model, predictionMap, inferenceStatus, shouldShowGroundTruth]);
+  }, [getFrom, model, dataset, predictionMap, inferenceStatus, shouldShowGroundTruth]);
 
   const datasetColumnsRavdess: ColumnDef<unknown, unknown>[] = useMemo(() => {
     const baseColumns = [

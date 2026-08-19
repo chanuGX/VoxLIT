@@ -27,6 +27,9 @@ interface EmbeddingPanelProps {
   /** Speaker Verification only: renders backend cluster-colored points from
    *  context instead of auto-fetching from the legacy embeddings endpoint. */
   verificationMode?: boolean;
+  /** False for tasks whose models are not in the legacy MODEL_FUNCTIONS
+   *  dispatch — calling /inferences/embeddings for those returns 400. */
+  legacyEmbeddings?: boolean;
   pairSelection?: string[];
   onPairSelectionChange?: (labels: string[]) => void;
   onReproject?: ((reductionMethod: string, nComponents: number) => void) | null;
@@ -120,7 +123,7 @@ interface WhisperAnalysis {
   };
 }
 
-export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", batchAnalysis = null, availableFiles = [], selectedFile, onFileSelect, verificationMode = false, pairSelection, onPairSelectionChange, onReproject }: EmbeddingPanelProps) => {
+export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice", batchAnalysis = null, availableFiles = [], selectedFile, onFileSelect, verificationMode = false, legacyEmbeddings = true, pairSelection, onPairSelectionChange, onReproject }: EmbeddingPanelProps) => {
   const [reductionMethod, setReductionMethod] = useState("pca");
   const [is3D, setIs3D] = useState(false);
   const [selectionMode, setSelectionMode] = useState<'box' | 'lasso'>('box');
@@ -157,13 +160,13 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
 
   // Auto-fetch embeddings when model, dataset, or reduction method changes
   useEffect(() => {
-    if (verificationMode) return;
+    if (verificationMode || !legacyEmbeddings) return;
     if (availableFiles.length > 0 && model && dataset) {
       const filesToProcess = availableFiles;
       const nComponents = is3D ? 3 : 2;
       fetchEmbeddings(model, dataset, filesToProcess, reductionMethod, nComponents);
     }
-  }, [model, dataset, availableFiles, reductionMethod, fetchEmbeddings, verificationMode]);
+  }, [model, dataset, availableFiles, reductionMethod, fetchEmbeddings, verificationMode, legacyEmbeddings]);
 
   // Speaker Verification: re-project already-computed embeddings via the
   // caller-supplied onReproject whenever this panel's own PCA/UMAP/t-SNE or
@@ -188,6 +191,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
       onReproject?.(reductionMethod, is3D ? 3 : 2);
       return;
     }
+    if (!legacyEmbeddings) return;
     if (availableFiles.length > 0) {
       // Use entire dataset for better visualization
       const filesToProcess = availableFiles;
@@ -492,7 +496,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
                       size="sm"
                       variant="secondary"
                       onClick={handleFetchEmbeddings}
-                      disabled={isLoading || availableFiles.length === 0}
+                      disabled={isLoading || availableFiles.length === 0 || !legacyEmbeddings}
                       className="h-7 w-7 p-0"
                     >
                       <RefreshCw className={`h-3 w-3 ${isLoading ? 'animate-spin text-primary' : ''}`} />
@@ -603,13 +607,19 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               </>
             ) : (
               <>
-                {availableFiles.length === 0 && (
+                {!legacyEmbeddings && (
+                  <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
+                    <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
+                    This task does not use the shared embedding view.
+                  </div>
+                )}
+                {legacyEmbeddings && availableFiles.length === 0 && (
                   <div className="text-xs text-muted-foreground flex items-center gap-2 p-3 bg-muted/50 rounded-md border border-border">
                     <div className="w-2 h-2 bg-muted-foreground rounded-full"></div>
                     No files available for embedding extraction
                   </div>
                 )}
-                {availableFiles.length > 0 && !embeddingData && !isLoading && (
+                {legacyEmbeddings && availableFiles.length > 0 && !embeddingData && !isLoading && (
                   <div className="text-xs flex items-center gap-2 p-3 bg-primary/5 rounded-sm border border-primary/20">
                     <div className="w-2 h-2 bg-primary rounded-full animate-pulse"></div>
                     Click <RefreshCw className="inline h-3 w-3 mx-1" /> to extract embeddings from all {availableFiles.length} files
@@ -631,7 +641,11 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
             )}
           </div>
 
-          {/* Embedding Plot */}
+          {/* Embedding Plot. Hidden for tasks with no embedding view at all:
+              EmbeddingContext survives navigation between tasks, so leaving it
+              mounted would show the PREVIOUS task's points here, and clicking
+              one would select a file that does not exist in this dataset. */}
+          {(legacyEmbeddings || verificationMode) && (
           <div className="h-[450px] border border-border rounded-lg bg-card p-1.5 overflow-hidden">
             <EmbeddingPlot
               selectedMethod={reductionMethod}
@@ -655,6 +669,7 @@ export const EmbeddingPanel = ({ model = "whisper-base", dataset = "common-voice
               verificationMode={verificationMode}
             />
           </div>
+          )}
 
           {/* Analysis Panel - Show when files are selected (2D or 3D); not applicable to Speaker Verification */}
           {!verificationMode && (selectedByAngle.length > 0 || selectedPoints2D.length > 0) && (
