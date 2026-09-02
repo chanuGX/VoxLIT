@@ -6,7 +6,20 @@ export interface ClusterSummary {
   member_indices: number[];
   member_labels: string[];
   mean_intra_cluster_similarity: number | null;
+  min_intra_cluster_similarity: number | null;
+  representative_index: number;
+  representative_label: string;
   mean_fit_score: number;
+}
+
+export interface RecordingClusterStats {
+  cluster_id: string;
+  mean_similarity_to_cluster: number | null;
+  min_similarity_to_cluster: number | null;
+  nearest_index: number;
+  nearest_label: string;
+  nearest_similarity: number;
+  nearest_in_same_cluster: boolean;
 }
 
 export interface BatchAnalysisResponse {
@@ -25,6 +38,7 @@ export interface BatchAnalysisResponse {
   cluster_fit_scores: number[];
   cluster_count: number;
   cluster_summaries: ClusterSummary[];
+  recording_cluster_stats: RecordingClusterStats[];
 }
 
 export interface BatchProjectionRequestBody {

@@ -194,6 +194,190 @@ def test_summarize_clusters_excludes_self_similarity_and_flags_singletons():
     assert by_id["cluster-3"]["mean_intra_cluster_similarity"] == pytest.approx(similarity[4, 5])
 
 
+def test_summarize_clusters_singleton_min_and_representative():
+    similarity = np.array(
+        [
+            [1.0, 0.9, 0.5, 0.0],
+            [0.9, 1.0, 0.9, 0.0],
+            [0.5, 0.9, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+    cluster_labels = ["cluster-1", "cluster-1", "cluster-1", "cluster-2"]
+    fit_scores = [0.0, 0.0, 0.0, 0.0]
+    member_labels = ["r0", "r1", "r2", "r3"]
+
+    summaries = clustering.summarize_clusters(cluster_labels, similarity, fit_scores, member_labels)
+    by_id = {summary["cluster_id"]: summary for summary in summaries}
+
+    # Multi-member cluster: min is the smallest pair similarity, and the
+    # medoid (r1, highest mean similarity to co-members: (0.9+0.9)/2=0.9)
+    # is unambiguous here.
+    assert by_id["cluster-1"]["min_intra_cluster_similarity"] == pytest.approx(0.5)
+    assert by_id["cluster-1"]["representative_index"] == 1
+    assert by_id["cluster-1"]["representative_label"] == "r1"
+
+    # Singleton cluster: both min and mean are None, representative is the
+    # sole member.
+    assert by_id["cluster-2"]["min_intra_cluster_similarity"] is None
+    assert by_id["cluster-2"]["mean_intra_cluster_similarity"] is None
+    assert by_id["cluster-2"]["representative_index"] == 3
+    assert by_id["cluster-2"]["representative_label"] == "r3"
+
+
+def test_summarize_clusters_representative_tie_breaks_by_lowest_index():
+    # All three members have an identical mean similarity to their
+    # co-members (0.8) -- a genuine three-way tie.
+    similarity = np.array(
+        [
+            [1.0, 0.8, 0.8],
+            [0.8, 1.0, 0.8],
+            [0.8, 0.8, 1.0],
+        ]
+    )
+    cluster_labels = ["cluster-1", "cluster-1", "cluster-1"]
+    fit_scores = [0.0, 0.0, 0.0]
+    member_labels = ["r0", "r1", "r2"]
+
+    summaries = clustering.summarize_clusters(cluster_labels, similarity, fit_scores, member_labels)
+    assert summaries[0]["representative_index"] == 0
+    assert summaries[0]["representative_label"] == "r0"
+
+
+def test_summarize_clusters_deterministic_under_exact_ties():
+    similarity = np.array(
+        [
+            [1.0, 0.8, 0.8],
+            [0.8, 1.0, 0.8],
+            [0.8, 0.8, 1.0],
+        ]
+    )
+    cluster_labels = ["cluster-1", "cluster-1", "cluster-1"]
+    fit_scores = [0.0, 0.0, 0.0]
+    member_labels = ["r0", "r1", "r2"]
+
+    first = clustering.summarize_clusters(cluster_labels, similarity, fit_scores, member_labels)
+    second = clustering.summarize_clusters(cluster_labels, similarity, fit_scores, member_labels)
+    assert first == second
+
+
+def test_per_recording_cluster_stats_never_resolves_to_self():
+    similarity = _block_similarity()
+    cluster_labels = ["cluster-1"] * 3 + ["cluster-2"] * 3
+    member_labels = ["r0", "r1", "r2", "r3", "r4", "r5"]
+
+    stats = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+    for index, entry in enumerate(stats):
+        assert entry["nearest_index"] != index
+
+
+def test_per_recording_cluster_stats_index_alignment_and_cluster_id():
+    similarity = _block_similarity()
+    cluster_labels = ["cluster-1"] * 3 + ["cluster-2"] * 3
+    member_labels = ["r0", "r1", "r2", "r3", "r4", "r5"]
+
+    stats = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+    assert len(stats) == len(cluster_labels)
+    for index, entry in enumerate(stats):
+        assert entry["cluster_id"] == cluster_labels[index]
+
+
+def test_per_recording_cluster_stats_nearest_across_whole_batch_not_same_cluster():
+    # r0's assigned cluster only offers a weak co-member (r1, 0.3), but its
+    # strongest similarity anywhere in the batch is to r2, which sits in a
+    # different cluster -- exactly the outlier signal the whole-batch search
+    # is meant to surface.
+    similarity = np.array(
+        [
+            [1.0, 0.3, 0.9],
+            [0.3, 1.0, 0.1],
+            [0.9, 0.1, 1.0],
+        ]
+    )
+    cluster_labels = ["cluster-1", "cluster-1", "cluster-2"]
+    member_labels = ["r0", "r1", "r2"]
+
+    stats = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+
+    assert stats[0]["mean_similarity_to_cluster"] == pytest.approx(0.3)
+    assert stats[0]["min_similarity_to_cluster"] == pytest.approx(0.3)
+    assert stats[0]["nearest_index"] == 2
+    assert stats[0]["nearest_label"] == "r2"
+    assert stats[0]["nearest_similarity"] == pytest.approx(0.9)
+    assert stats[0]["nearest_in_same_cluster"] is False
+
+    assert stats[1]["nearest_index"] == 0
+    assert stats[1]["nearest_in_same_cluster"] is True
+
+    # r2 is a singleton cluster: both intra-cluster stats are None, and its
+    # nearest neighbour (r0) is necessarily in a different cluster.
+    assert stats[2]["mean_similarity_to_cluster"] is None
+    assert stats[2]["min_similarity_to_cluster"] is None
+    assert stats[2]["nearest_index"] == 0
+    assert stats[2]["nearest_in_same_cluster"] is False
+
+
+def test_per_recording_cluster_stats_deterministic_under_exact_ties():
+    # r0 is exactly tied between r1 and r2 -- must always resolve to the
+    # lowest index (r1), on every call.
+    similarity = np.array(
+        [
+            [1.0, 0.7, 0.7],
+            [0.7, 1.0, 0.2],
+            [0.7, 0.2, 1.0],
+        ]
+    )
+    cluster_labels = ["cluster-1", "cluster-1", "cluster-2"]
+    member_labels = ["r0", "r1", "r2"]
+
+    first = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+    second = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+    assert first == second
+    assert first[0]["nearest_index"] == 1
+
+
+@pytest.mark.parametrize(
+    "similarity,cluster_labels,expected",
+    [
+        (
+            np.array([[1.0, 0.6], [0.6, 1.0]]),
+            ["cluster-1", "cluster-1"],
+            [
+                {"mean": pytest.approx(0.6), "min": pytest.approx(0.6), "nearest": 1, "same_cluster": True},
+                {"mean": pytest.approx(0.6), "min": pytest.approx(0.6), "nearest": 0, "same_cluster": True},
+            ],
+        ),
+        (
+            np.array([[1.0, 0.2], [0.2, 1.0]]),
+            ["cluster-1", "cluster-2"],
+            [
+                {"mean": None, "min": None, "nearest": 1, "same_cluster": False},
+                {"mean": None, "min": None, "nearest": 0, "same_cluster": False},
+            ],
+        ),
+    ],
+)
+def test_per_recording_cluster_stats_minimum_two_recording_batch(similarity, cluster_labels, expected):
+    member_labels = ["r0", "r1"]
+    stats = clustering.per_recording_cluster_stats(cluster_labels, similarity, member_labels)
+    for entry, expectation in zip(stats, expected):
+        assert entry["mean_similarity_to_cluster"] == expectation["mean"]
+        assert entry["min_similarity_to_cluster"] == expectation["min"]
+        assert entry["nearest_index"] == expectation["nearest"]
+        assert entry["nearest_in_same_cluster"] == expectation["same_cluster"]
+
+
+def test_cluster_batch_includes_recording_cluster_stats():
+    similarity = _block_similarity()
+    labels = ["r0", "r1", "r2", "r3", "r4", "r5"]
+
+    result = clustering.cluster_batch("ecapa-tdnn", similarity, labels)
+
+    assert len(result["recording_cluster_stats"]) == len(labels)
+    for index, entry in enumerate(result["recording_cluster_stats"]):
+        assert entry["cluster_id"] == result["cluster_labels"][index]
+
+
 _CLUSTERING_FAKE_SPEC = service.SpeakerModelSpec(
     key="ecapa-tdnn",
     label="Test model",

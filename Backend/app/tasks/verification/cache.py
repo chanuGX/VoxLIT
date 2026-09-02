@@ -25,7 +25,7 @@ from redis.exceptions import RedisError
 from app.core import redis as redis_module
 
 EMBEDDING_CACHE_SCHEMA_VERSION = "embedding-cache-v1"
-BATCH_RESULT_SCHEMA_VERSION = "batch-result-v1"
+BATCH_RESULT_SCHEMA_VERSION = "batch-result-v2"
 
 EMBEDDING_CACHE_TTL_SECONDS = 24 * 60 * 60
 BATCH_RESULT_CACHE_TTL_SECONDS = 6 * 60 * 60

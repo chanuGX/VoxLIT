@@ -10,6 +10,7 @@ import type { UploadedFile } from "@/tasks/types";
 import { ClusterSummaryList } from "./ClusterSummaryList";
 import { PairComparisonCard } from "./PairComparisonCard";
 import { buildClusterColorMap } from "./clusterColors";
+import { clusterAssignmentStore } from "./clusterAssignmentStore";
 import { SpeakerSaliencyMap } from "./SpeakerSaliencyMap";
 import { verificationAudioUrl } from "./audioUrl";
 import type { SaliencyMapResponse } from "./saliencyTypes";
@@ -123,8 +124,42 @@ export const BatchAnalysisPanel = ({
     setFocusedClusterId(null);
     setSaliencyResult(null);
     setSaliencyError(null);
+    clusterAssignmentStore.publish(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, dataset, selectedBatchIds]);
+
+  // Cluster-assignment card (SV-FR-23, rendered in the Datapoint Editor) reads
+  // from a module-level store instead of props -- see clusterAssignmentStore.ts.
+  // Publishes the selected recording's entry whenever the batch result or
+  // selection changes; clears on unmount so a stale card can never outlive
+  // this panel.
+  useEffect(() => {
+    if (!batchResult || !selectedFile) {
+      clusterAssignmentStore.publish(null);
+      return;
+    }
+    const index = submittedIds.indexOf(selectedFile.file_id);
+    if (index === -1) {
+      clusterAssignmentStore.publish(null);
+      return;
+    }
+    const stats = batchResult.recording_cluster_stats[index];
+    const clusterSummary = batchResult.cluster_summaries.find(
+      (summary) => summary.cluster_id === stats.cluster_id
+    );
+    clusterAssignmentStore.publish({
+      fileId: selectedFile.file_id,
+      stats,
+      clusterSize: clusterSummary?.member_count ?? 1,
+      modelLabel: batchResult.model_label,
+      clusteringDistanceThreshold: batchResult.clustering_distance_threshold,
+      clusteringThresholdVersion: batchResult.clustering_threshold_version,
+    });
+  }, [batchResult, selectedFile, submittedIds]);
+
+  useEffect(() => {
+    return () => clusterAssignmentStore.publish(null);
+  }, []);
 
   // Selecting a different recording invalidates any prior saliency map (it
   // explained a different target) -- never touches selectedBatchIds, graph

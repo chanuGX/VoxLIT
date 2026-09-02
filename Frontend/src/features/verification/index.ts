@@ -10,3 +10,4 @@
  * and flip the task's status to "active".
  */
 export { SpeakerVerificationWorkbench } from "./SpeakerVerificationWorkbench.tsx";
+export { ClusterAssignmentResults } from "./ClusterAssignmentResults.tsx";

@@ -127,7 +127,8 @@ def summarize_clusters(
     fit_scores: Sequence[float],
     member_labels: Sequence[str],
 ) -> list[dict[str, object]]:
-    """Per-cluster membership, mean intra-cluster similarity, and mean fit score."""
+    """Per-cluster membership, mean/min intra-cluster similarity, representative
+    medoid, and mean fit score."""
 
     clusters: dict[str, list[int]] = {}
     for index, cluster_id in enumerate(cluster_labels):
@@ -142,8 +143,22 @@ def summarize_clusters(
                 for j in indices[position + 1 :]
             ]
             mean_similarity: float | None = float(np.mean(pair_similarities))
+            min_similarity: float | None = float(np.min(pair_similarities))
+
+            # Medoid: member with highest mean similarity to its co-members.
+            # `indices` is already ascending (built by enumeration order), and
+            # np.argmax returns the first max on ties, so this is a lowest-
+            # index tie-break for free.
+            submatrix = similarity[np.ix_(indices, indices)]
+            co_member_sums = submatrix.sum(axis=1) - np.diag(submatrix)
+            mean_to_co_members = co_member_sums / (len(indices) - 1)
+            representative_position = int(np.argmax(mean_to_co_members))
         else:
             mean_similarity = None
+            min_similarity = None
+            representative_position = 0
+
+        representative_index = indices[representative_position]
 
         summaries.append(
             {
@@ -152,10 +167,72 @@ def summarize_clusters(
                 "member_indices": indices,
                 "member_labels": [member_labels[i] for i in indices],
                 "mean_intra_cluster_similarity": mean_similarity,
+                "min_intra_cluster_similarity": min_similarity,
+                "representative_index": representative_index,
+                "representative_label": member_labels[representative_index],
                 "mean_fit_score": float(np.mean([fit_scores[i] for i in indices])),
             }
         )
     return summaries
+
+
+def per_recording_cluster_stats(
+    cluster_labels: Sequence[str],
+    similarity: np.ndarray,
+    member_labels: Sequence[str],
+) -> list[dict[str, object]]:
+    """Per-recording cluster fit and whole-batch nearest-neighbour stats.
+
+    Two deliberate decisions:
+    - Nearest neighbour is computed across the whole batch, not just within
+      the assigned cluster. A clip whose nearest neighbour sits in a different
+      cluster is exactly the signal a reviewer wants surfaced, and it feeds a
+      planned Outlier Analysis panel.
+    - `similarity` has an exact unit diagonal (self-similarity == 1.0), so the
+      diagonal must be masked out before taking the row-wise argmax, or every
+      recording would report itself as its own nearest neighbour. Ties are
+      broken by lowest index (numpy's argmax returns the first maximum).
+    """
+
+    n = len(cluster_labels)
+    clusters: dict[str, list[int]] = {}
+    for index, cluster_id in enumerate(cluster_labels):
+        clusters.setdefault(cluster_id, []).append(index)
+
+    mean_to_cluster = np.full(n, np.nan)
+    min_to_cluster = np.full(n, np.nan)
+    for indices in clusters.values():
+        if len(indices) <= 1:
+            continue
+        submatrix = similarity[np.ix_(indices, indices)].copy()
+        np.fill_diagonal(submatrix, np.nan)
+        mean_to_cluster[indices] = np.nanmean(submatrix, axis=1)
+        min_to_cluster[indices] = np.nanmin(submatrix, axis=1)
+
+    masked_similarity = similarity.copy()
+    np.fill_diagonal(masked_similarity, -np.inf)
+    nearest_indices = np.argmax(masked_similarity, axis=1)
+
+    stats: list[dict[str, object]] = []
+    for i in range(n):
+        nearest_index = int(nearest_indices[i])
+        cluster_id = cluster_labels[i]
+        stats.append(
+            {
+                "cluster_id": cluster_id,
+                "mean_similarity_to_cluster": (
+                    None if np.isnan(mean_to_cluster[i]) else float(mean_to_cluster[i])
+                ),
+                "min_similarity_to_cluster": (
+                    None if np.isnan(min_to_cluster[i]) else float(min_to_cluster[i])
+                ),
+                "nearest_index": nearest_index,
+                "nearest_label": member_labels[nearest_index],
+                "nearest_similarity": float(similarity[i, nearest_index]),
+                "nearest_in_same_cluster": cluster_labels[nearest_index] == cluster_id,
+            }
+        )
+    return stats
 
 
 def cluster_batch(
@@ -173,6 +250,7 @@ def cluster_batch(
     cluster_labels = remap_labels_by_first_appearance(raw_labels)
     fit_scores = cluster_fit_scores(distance, cluster_labels)
     summaries = summarize_clusters(cluster_labels, similarity, fit_scores, list(labels))
+    recording_stats = per_recording_cluster_stats(cluster_labels, similarity, list(labels))
 
     return {
         "clustering_distance_threshold": spec.distance_threshold,
@@ -181,4 +259,5 @@ def cluster_batch(
         "cluster_fit_scores": fit_scores,
         "cluster_count": len(summaries),
         "cluster_summaries": summaries,
+        "recording_cluster_stats": recording_stats,
     }

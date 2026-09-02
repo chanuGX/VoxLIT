@@ -2,7 +2,7 @@ import React from "react";
 import { TaskDefinition, TaskId, PredictionResultsProps, WorkbenchCenterProps } from "./types";
 import { TranscriptionResults } from "@/features/transcription/TranscriptionResults";
 import { ClassificationResults } from "@/features/emotion/ClassificationResults";
-import { SpeakerVerificationWorkbench } from "@/features/verification";
+import { SpeakerVerificationWorkbench, ClusterAssignmentResults } from "@/features/verification";
 import { DiarizationWorkbench } from "@/features/task-b";
 import { DeepfakeWorkbench } from "@/features/deepfake";
 
@@ -224,7 +224,7 @@ export const TASK_SLOTS: Record<
 > = {
   transcription: { PredictionResults: TranscriptionResults },
   emotion: { PredictionResults: ClassificationResults },
-  verification: { WorkbenchCenter: SpeakerVerificationWorkbench },
+  verification: { WorkbenchCenter: SpeakerVerificationWorkbench, PredictionResults: ClusterAssignmentResults },
   "task-b": { WorkbenchCenter: DiarizationWorkbench },
   deepfake: { WorkbenchCenter: DeepfakeWorkbench },
 };

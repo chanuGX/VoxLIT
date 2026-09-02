@@ -99,7 +99,14 @@ export const ClusterSummaryList = ({
                     ? "Not applicable"
                     : formatScore(cluster.mean_intra_cluster_similarity)}
                 </span>
+                <span>
+                  Min intra-cluster similarity:{" "}
+                  {cluster.min_intra_cluster_similarity === null
+                    ? "Not applicable"
+                    : formatScore(cluster.min_intra_cluster_similarity)}
+                </span>
                 <span>Mean cluster fit score: {formatScore(cluster.mean_fit_score)}</span>
+                <span>Representative clip: {cluster.representative_label}</span>
               </div>
               <p className="truncate text-muted-foreground">{cluster.member_labels.join(", ")}</p>
             </button>
