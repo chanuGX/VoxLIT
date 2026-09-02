@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AlertCircle, PlayCircle } from "lucide-react";
+import { AlertCircle, Download, PlayCircle } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import { verificationAudioUrl } from "./audioUrl";
 import type { SaliencyMapResponse } from "./saliencyTypes";
 import type {
   BatchAnalysisResponse,
+  BatchExportRequestBody,
   BatchProjectionRequestBody,
   BatchProjectionResponse,
   ReductionMethod,
@@ -63,6 +64,8 @@ export const BatchAnalysisPanel = ({
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [isProjecting, setIsProjecting] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   // Snapshot of selectedBatchIds at the moment Run was clicked — batchResult.labels
   // are index-aligned to this, not to the (possibly since-changed) live prop.
   const [submittedIds, setSubmittedIds] = useState<string[]>([]);
@@ -77,6 +80,7 @@ export const BatchAnalysisPanel = ({
 
   const batchAbortRef = useRef<AbortController | null>(null);
   const projectionAbortRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
   // Auto-run: fires runBatch() once per (model, dataset) pair, the first
   // time canRun becomes true for that pair. Covers "run once on initial
   // load" and "rerun when the user changes model," without refiring on
@@ -116,9 +120,14 @@ export const BatchAnalysisPanel = ({
       saliencyAbortRef.current.abort();
       saliencyAbortRef.current = null;
     }
+    if (exportAbortRef.current) {
+      exportAbortRef.current.abort();
+      exportAbortRef.current = null;
+    }
     setBatchResult(null);
     setBatchError(null);
     setProjectionError(null);
+    setExportError(null);
     setSubmittedIds([]);
     setEmbeddingDataDirect(null);
     setFocusedClusterId(null);
@@ -338,6 +347,64 @@ export const BatchAnalysisPanel = ({
     return () => onReprojectHandlerChange(null);
   }, [batchResult, reprojectAndPublish, onReprojectHandlerChange]);
 
+  // Serializes the already-computed batchResult to CSV server-side (SV-FR-36)
+  // -- never re-runs the model, never recomputes embeddings/similarity/clustering.
+  const exportBatchCsv = async () => {
+    if (!batchResult) return;
+    if (exportAbortRef.current) {
+      exportAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+
+    setIsExporting(true);
+    setExportError(null);
+
+    const body: BatchExportRequestBody = {
+      model: batchResult.model,
+      labels: batchResult.labels,
+      cluster_labels: batchResult.cluster_labels,
+      cluster_summaries: batchResult.cluster_summaries,
+      recording_cluster_stats: batchResult.recording_cluster_stats,
+      cluster_count: batchResult.cluster_count,
+    };
+
+    try {
+      const response = await fetch(`${API_BASE}/tasks/verification/batch/export`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      // A successful response here is CSV, not JSON, unlike every other call
+      // in this file -- response.ok must be checked before deciding whether
+      // to parse an error's JSON detail or read a blob.
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}) as { detail?: string });
+        throw new Error(errorPayload.detail || `Export failed (${response.status}).`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `voxlit-cluster-export-${batchResult.model}-${stamp}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      if (isAbortError(caught)) return;
+      setExportError(caught instanceof Error ? caught.message : "Export failed.");
+    } finally {
+      setIsExporting(false);
+      if (exportAbortRef.current === controller) {
+        exportAbortRef.current = null;
+      }
+    }
+  };
+
   // Index-aligned label -> submitted id map (never derived from projected
   // coordinates or array position alone — always this explicit run-order contract).
   const labelToFileId = useCallback(
@@ -444,8 +511,13 @@ export const BatchAnalysisPanel = ({
             <PlayCircle className="h-3.5 w-3.5" />
             {isBatchRunning ? "Extracting embeddings…" : "Run batch analysis"}
           </Button>
+          <Button size="sm" variant="outline" onClick={exportBatchCsv} disabled={!batchResult || isExporting}>
+            <Download className="h-3.5 w-3.5" />
+            {isExporting ? "Exporting…" : "Export CSV"}
+          </Button>
           {isProjecting && <p className="text-muted-foreground">Re-projecting embeddings…</p>}
           {projectionError && <p className="text-red-500">{projectionError}</p>}
+          {exportError && <p className="text-red-500">{exportError}</p>}
         </CardContent>
       </Card>
 

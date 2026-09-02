@@ -58,3 +58,12 @@ export interface BatchProjectionResponse {
   effective_components: number;
   coordinates: number[][];
 }
+
+export interface BatchExportRequestBody {
+  model: string;
+  labels: string[];
+  cluster_labels: string[];
+  cluster_summaries: ClusterSummary[];
+  recording_cluster_stats: RecordingClusterStats[];
+  cluster_count: number;
+}

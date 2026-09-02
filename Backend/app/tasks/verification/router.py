@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
 import torch
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 from redis.exceptions import RedisError
 from starlette.concurrency import run_in_threadpool
@@ -20,7 +21,7 @@ from app.services.dataset_service import media_type_for
 
 from app.core.session import InvalidSessionId, validate_session_id
 
-from . import cache, clustering, custom_recordings, session_assets
+from . import cache, clustering, custom_recordings, export, session_assets
 from .audio_streaming import stream_audio_file
 from .dataset import (
     DatasetUnavailable,
@@ -555,6 +556,56 @@ async def run_batch_projection(payload: BatchProjectionRequest):
         "effective_components": effective_components,
         "coordinates": coordinates.tolist(),
     }
+
+
+@router.post("/batch/export")
+async def export_batch_analysis(payload: export.BatchExportRequest):
+    """Serialize an already-computed batch analysis result (SV-FR-36) into a
+    downloadable CSV. Pure serialization -- no model inference, no
+    recomputed embeddings/similarity/clustering. Every metadata value in the
+    CSV (model identity, both thresholds, all version strings) is derived
+    server-side from the validated `model` key alone; the client never
+    supplies a threshold or version value (MQ-10: a tampered payload must
+    not be able to misrepresent the evidence-vs-threshold framing).
+
+    Deliberately returns 422 for every validation failure on this endpoint,
+    including an unknown model key -- unlike the 400 this router's other
+    handlers use for the same `UnsupportedSpeakerModel` failure. This is
+    intentional for this endpoint only; do not "fix" it to 400 for
+    consistency with the rest of the router.
+    """
+
+    try:
+        spec = get_model_spec(payload.model)
+    except UnsupportedSpeakerModel as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    try:
+        export.validate_export_payload(payload)
+    except export.ExportValidationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    clustering_spec = clustering.CLUSTERING_SPECS[payload.model]
+    generated_at = datetime.now(timezone.utc)
+    csv_text = export.build_export_csv(
+        payload,
+        spec,
+        clustering_spec,
+        pair_threshold_version=PAIR_THRESHOLD_VERSION,
+        clustering_threshold_version=clustering.CLUSTERING_THRESHOLD_VERSION,
+        preprocessing_version=PREPROCESSING_VERSION,
+        generated_at=generated_at,
+    )
+
+    filename = (
+        f"voxlit-cluster-export-{payload.model}-"
+        f"{generated_at.strftime('%Y%m%dT%H%M%SZ')}.csv"
+    )
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/explain/temporal-occlusion")
