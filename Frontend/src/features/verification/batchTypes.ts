@@ -29,6 +29,8 @@ export interface BatchAnalysisResponse {
   recording_count: number;
   embedding_dimension: number;
   labels: string[];
+  ground_truth_groups: string[] | null;
+  ground_truth_available: boolean;
   embeddings: number[][];
   similarity_matrix: number[][];
   decision_matrix: boolean[][];

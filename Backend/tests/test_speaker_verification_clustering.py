@@ -439,6 +439,43 @@ def test_pair_verification_decisions_unaffected_by_clustering(monkeypatch):
     assert result["decision_matrix"] == [[True, False], [False, True]]
 
 
+def test_ground_truth_groups_do_not_affect_clustering_or_similarity(monkeypatch):
+    embeddings = torch.stack(
+        [
+            torch.nn.functional.normalize(torch.tensor([1.0, 0.0]), p=2, dim=0),
+            torch.nn.functional.normalize(torch.tensor([0.99, 0.01]), p=2, dim=0),
+            torch.nn.functional.normalize(torch.tensor([0.0, 1.0]), p=2, dim=0),
+        ]
+    )
+    monkeypatch.setattr(service, "get_model_spec", lambda _: _CLUSTERING_FAKE_SPEC)
+
+    without_ground_truth = service.assemble_batch_analysis("ecapa-tdnn", embeddings, ["l0", "l1", "l2"])
+    with_ground_truth = service.assemble_batch_analysis(
+        "ecapa-tdnn",
+        embeddings,
+        ["l0", "l1", "l2"],
+        ground_truth_groups=["speaker-group-1", "speaker-group-1", "speaker-group-2"],
+    )
+
+    # Ground truth is reporting-only -- every clustering/embedding/similarity
+    # field must be byte-identical whether or not it's supplied.
+    assert without_ground_truth["similarity_matrix"] == with_ground_truth["similarity_matrix"]
+    assert without_ground_truth["decision_matrix"] == with_ground_truth["decision_matrix"]
+    assert without_ground_truth["cluster_labels"] == with_ground_truth["cluster_labels"]
+    assert without_ground_truth["cluster_fit_scores"] == with_ground_truth["cluster_fit_scores"]
+    assert without_ground_truth["cluster_count"] == with_ground_truth["cluster_count"]
+    assert without_ground_truth["cluster_summaries"] == with_ground_truth["cluster_summaries"]
+
+    assert without_ground_truth["ground_truth_available"] is False
+    assert without_ground_truth["ground_truth_groups"] is None
+    assert with_ground_truth["ground_truth_available"] is True
+    assert with_ground_truth["ground_truth_groups"] == [
+        "speaker-group-1",
+        "speaker-group-1",
+        "speaker-group-2",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_batch_upload_endpoint_response_includes_clustering_fields(client):
     expected = {

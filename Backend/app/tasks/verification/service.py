@@ -333,16 +333,26 @@ def assemble_batch_analysis(
     model_key: str,
     embeddings: torch.Tensor,
     labels: Sequence[str],
+    ground_truth_groups: Sequence[str] | None = None,
 ) -> dict[str, object]:
     """Pairwise similarity/decision/clustering analysis from precomputed embeddings.
 
     Split out of `batch_verification_analysis` so a caller can supply a
     tensor merged from cached and freshly extracted embeddings without
     re-running extraction.
+
+    `ground_truth_groups`, when provided, must be index-aligned with `labels`
+    and is echoed back verbatim as reporting-only ground truth -- it plays no
+    role in clustering, embeddings, or thresholds. Callers are responsible
+    for deciding when partial ground truth should collapse to `None` (see
+    `router.run_batch_dataset`); this function only validates length and
+    reports availability.
     """
 
     if embeddings.shape[0] != len(labels):
         raise ValueError("Embeddings and labels must have the same length.")
+    if ground_truth_groups is not None and len(ground_truth_groups) != len(labels):
+        raise ValueError("Ground-truth groups and labels must have the same length.")
 
     spec = get_model_spec(model_key)
     similarity = pairwise_similarity_matrix(embeddings)
@@ -360,6 +370,8 @@ def assemble_batch_analysis(
         "similarity_matrix": similarity.tolist(),
         "decision_matrix": decisions.tolist(),
         **cluster_result,
+        "ground_truth_groups": list(ground_truth_groups) if ground_truth_groups is not None else None,
+        "ground_truth_available": ground_truth_groups is not None,
     }
 
 

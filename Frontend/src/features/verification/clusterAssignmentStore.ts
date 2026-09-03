@@ -15,6 +15,8 @@ export interface ClusterAssignmentSnapshot {
   modelLabel: string;
   clusteringDistanceThreshold: number;
   clusteringThresholdVersion: string;
+  groundTruthGroup: string | null;
+  groundTruthAvailable: boolean;
 }
 
 let snapshot: ClusterAssignmentSnapshot | null = null;

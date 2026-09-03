@@ -123,6 +123,15 @@ def test_batch_verification_analysis_rejects_out_of_range_counts(monkeypatch):
         service.batch_verification_analysis("test-model", ["only-one.wav"], ["l0"])
 
 
+def test_assemble_batch_analysis_raises_on_ground_truth_length_mismatch():
+    embeddings = torch.zeros((2, 2))
+
+    with pytest.raises(ValueError):
+        service.assemble_batch_analysis(
+            "test-model", embeddings, ["l0", "l1"], ground_truth_groups=["only-one"]
+        )
+
+
 def test_batch_verification_analysis_returns_expected_contract(monkeypatch):
     # Real adapters always return L2-normalised embeddings (via
     # `_BaseAdapter.validate_embedding`); the fake mirrors that guarantee.
@@ -250,6 +259,37 @@ async def test_batch_upload_endpoint_uses_server_generated_labels(client):
 
 
 @pytest.mark.asyncio
+async def test_batch_upload_ground_truth_unavailable(client):
+    files = [
+        ("files", _audio_upload("a.wav")),
+        ("files", _audio_upload("b.wav")),
+    ]
+    expected = {
+        "model": "ecapa-tdnn",
+        "labels": ["upload-000", "upload-001"],
+        "ground_truth_groups": None,
+        "ground_truth_available": False,
+    }
+    with patch(
+        "app.tasks.verification.router._cached_batch_analysis",
+        return_value=expected,
+    ) as mock_analysis:
+        response = await client.post(
+            "/tasks/verification/batch/upload",
+            data={"model": "ecapa-tdnn"},
+            files=files,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["ground_truth_available"] is False
+    assert response.json()["ground_truth_groups"] is None
+    # run_batch_upload never builds a ground_truth_groups arg -- it relies on
+    # _cached_batch_analysis's own default (None), so only 3 positional args
+    # are ever passed for an upload-only batch.
+    assert len(mock_analysis.call_args.args) == 3
+
+
+@pytest.mark.asyncio
 async def test_batch_dataset_endpoint_rejects_out_of_range_counts(client, fake_dataset_dir):
     response = await client.post(
         "/tasks/verification/batch/dataset",
@@ -339,6 +379,90 @@ async def test_batch_dataset_endpoint_accepts_mixed_demo_and_session_asset_ids(c
     assert response.json() == expected
     call_labels = mock_analysis.call_args.args[2]
     assert call_labels == mixed_ids
+
+
+@pytest.mark.asyncio
+async def test_batch_dataset_ground_truth_groups_aligned_with_labels(client, fake_dataset_dir):
+    # FAKE_FILES here spans two prefixes (id10018 x2, id10324 x2) -- the
+    # most important test in this commit: ground_truth_groups[i] must
+    # correspond to labels[i] for every i, and recordings sharing an
+    # underlying prefix must share a group.
+    recordings = dataset.list_recordings()
+    ids = [recording.recording_id for recording in recordings]
+    expected_map = dataset.get_speaker_group_map()
+    expected_groups = [expected_map[recording_id] for recording_id in ids]
+
+    expected = {"model": "ecapa-tdnn", "labels": ids, "recording_count": len(ids)}
+    with patch(
+        "app.tasks.verification.router._cached_batch_analysis",
+        return_value=expected,
+    ) as mock_analysis:
+        response = await client.post(
+            "/tasks/verification/batch/dataset",
+            json={"model": "ecapa-tdnn", "recording_ids": ids},
+        )
+
+    assert response.status_code == 200
+    call_labels = mock_analysis.call_args.args[2]
+    call_groups = mock_analysis.call_args.args[3]
+    assert call_labels == ids
+    assert call_groups == expected_groups
+    assert all(group is not None for group in call_groups)
+    for i, recording_id in enumerate(ids):
+        for j, other_id in enumerate(ids):
+            same_prefix = expected_map[recording_id] == expected_map[other_id]
+            assert (call_groups[i] == call_groups[j]) == same_prefix
+
+
+@pytest.mark.asyncio
+async def test_batch_dataset_mixed_demo_and_session_asset_ids_ground_truth_unavailable(client, fake_dataset_dir):
+    demo_id = dataset.list_recordings()[0].recording_id
+    upload = await client.post(
+        "/tasks/verification/session-assets/upload",
+        files={"file": ("clip.wav", io.BytesIO(_wav_bytes()), "audio/wav")},
+    )
+    assert upload.status_code == 200
+    asset_id = upload.json()["asset_id"]
+
+    mixed_ids = [demo_id, asset_id]
+    expected = {"model": "ecapa-tdnn", "labels": mixed_ids, "recording_count": 2}
+    with patch(
+        "app.tasks.verification.router._cached_batch_analysis",
+        return_value=expected,
+    ) as mock_analysis:
+        response = await client.post(
+            "/tasks/verification/batch/dataset",
+            json={"model": "ecapa-tdnn", "recording_ids": mixed_ids},
+        )
+
+    assert response.status_code == 200
+    assert mock_analysis.call_args.args[3] is None
+
+
+@pytest.mark.asyncio
+async def test_batch_dataset_demo_batch_with_unparseable_prefix_ground_truth_unavailable(
+    client, monkeypatch, tmp_path
+):
+    dataset_dir = tmp_path / "vox_indian_demo_92"
+    dataset_dir.mkdir(parents=True)
+    filenames = ["id10018_01.wav", "upload-000.wav"]
+    for filename in filenames:
+        (dataset_dir / filename).write_bytes(b"RIFF-fake-audio")
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+
+    ids = [dataset._recording_id_for(name) for name in filenames]
+    expected = {"model": "ecapa-tdnn", "labels": ids, "recording_count": 2}
+    with patch(
+        "app.tasks.verification.router._cached_batch_analysis",
+        return_value=expected,
+    ) as mock_analysis:
+        response = await client.post(
+            "/tasks/verification/batch/dataset",
+            json={"model": "ecapa-tdnn", "recording_ids": ids},
+        )
+
+    assert response.status_code == 200
+    assert mock_analysis.call_args.args[3] is None
 
 
 @pytest.mark.asyncio

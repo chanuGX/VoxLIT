@@ -25,9 +25,11 @@ from . import cache, clustering, custom_recordings, export, session_assets
 from .audio_streaming import stream_audio_file
 from .dataset import (
     DatasetUnavailable,
+    RecordingInfo,
     RecordingNotFound,
     get_dataset_info,
     get_recording,
+    get_speaker_group_map,
     list_recordings,
     resolve_recording_path,
 )
@@ -60,6 +62,17 @@ async def dataset_info():
     return get_dataset_info()
 
 
+def _public_recording_payload(recording: RecordingInfo) -> dict[str, object]:
+    """`asdict(recording)` with `speaker_group_id` stripped. Browsing
+    endpoints must never expose ground-truth grouping -- it is reporting-only
+    data scoped to batch-analysis responses, so the dataset table can't be
+    used to read the answers off before running an analysis."""
+
+    payload = asdict(recording)
+    payload.pop("speaker_group_id", None)
+    return payload
+
+
 @router.get("/dataset/recordings")
 async def dataset_recordings():
     try:
@@ -70,7 +83,7 @@ async def dataset_recordings():
     return {
         "dataset_id": get_dataset_info()["dataset_id"],
         "total_recordings": len(recordings),
-        "recordings": [asdict(recording) for recording in recordings],
+        "recordings": [_public_recording_payload(recording) for recording in recordings],
     }
 
 
@@ -83,7 +96,7 @@ async def dataset_recording(recording_id: str):
     except RecordingNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
-    return asdict(recording)
+    return _public_recording_payload(recording)
 
 
 @router.get("/dataset/recordings/{recording_id}/audio")
@@ -357,6 +370,7 @@ async def _cached_batch_analysis(
     model_key: str,
     audio_paths: list[Path],
     labels: list[str],
+    ground_truth_groups: list[str] | None = None,
 ) -> dict[str, object]:
     """Batch analysis with a task-local Redis cache in front of it.
 
@@ -426,7 +440,7 @@ async def _cached_batch_analysis(
     merged_embeddings = torch.stack(embeddings)  # type: ignore[arg-type]
 
     result = await run_in_threadpool(
-        assemble_batch_analysis, model_key, merged_embeddings, labels
+        assemble_batch_analysis, model_key, merged_embeddings, labels, ground_truth_groups
     )
 
     await cache.set_batch_result(result_key, result)
@@ -500,8 +514,14 @@ async def run_batch_dataset(payload: BatchDatasetRequest, request: Request):
     sid = _require_sid(request)
     audio_paths = [await _resolve_audio_source(recording_id, sid) for recording_id in recording_ids]
 
+    group_map = get_speaker_group_map()
+    raw_groups = [group_map.get(recording_id) for recording_id in recording_ids]
+    ground_truth_groups: list[str] | None = (
+        raw_groups if all(group is not None for group in raw_groups) else None
+    )
+
     try:
-        return await _cached_batch_analysis(payload.model, audio_paths, recording_ids)
+        return await _cached_batch_analysis(payload.model, audio_paths, recording_ids, ground_truth_groups)
     except (ValueError, RuntimeError) as error:
         status = 503 if isinstance(error, SpeakerModelUnavailable) else 422
         raise HTTPException(status_code=status, detail=str(error)) from error

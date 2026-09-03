@@ -6,11 +6,22 @@ filenames (e.g. `id10018_01.wav`) encode a VoxCeleb speaker-id prefix that
 groups recordings by speaker, and `metadata.csv` maps those ids to real
 celebrity names — both are ground truth reserved for offline evaluation and
 must never reach a runtime response.
+
+Recordings additionally carry an anonymous `speaker_group_id` (e.g.
+"speaker-group-3"), derived solely from the VoxCeleb speaker-id prefix
+embedded in each filename. Unlike the prefix itself, this opaque group label
+*is* allowed to reach runtime responses -- but only batch-analysis results,
+where it is used as reporting-only ground truth (see `get_speaker_group_map`).
+The raw prefix string, the real filename, and `metadata.csv` (which maps ids
+to real celebrity names) are still never read for this purpose and never
+reach any response, including the recording-browsing endpoints, which strip
+`speaker_group_id` back out before returning.
 """
 
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +32,8 @@ from app.core.settings import settings
 DATASET_ID = "voxceleb1-indian-demo"
 EXPECTED_RECORDING_COUNT = 92
 SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac"}
+
+_SPEAKER_PREFIX_PATTERN = re.compile(r"^id\d+")
 
 
 class DatasetUnavailable(RuntimeError):
@@ -38,6 +51,7 @@ class RecordingInfo:
     extension: str
     size_bytes: int
     duration_seconds: float | None
+    speaker_group_id: str | None
 
 
 def _dataset_dir() -> Path:
@@ -47,6 +61,16 @@ def _dataset_dir() -> Path:
 def _recording_id_for(filename: str) -> str:
     digest = hashlib.sha256(filename.encode("utf-8")).hexdigest()
     return f"rec_{digest[:16]}"
+
+
+def _speaker_prefix_for(filename: str) -> str | None:
+    """Extract the VoxCeleb speaker-id prefix (e.g. "id10018" from
+    "id10018_01.wav"), used only to derive an anonymous speaker-group id.
+    Returns `None` on any non-matching filename rather than raising, so a
+    stray file degrades gracefully instead of taking down dataset listing."""
+
+    match = _SPEAKER_PREFIX_PATTERN.match(filename)
+    return match.group(0) if match else None
 
 
 def _duration_seconds(path: Path) -> float | None:
@@ -76,23 +100,48 @@ def _iter_audio_files(dataset_dir: Path):
 
 
 def _discover(dataset_dir: Path) -> list[RecordingInfo]:
-    recordings: list[RecordingInfo] = []
+    staged: list[tuple[str, str, int, float | None, str | None]] = []
     for entry in _iter_audio_files(dataset_dir):
         extension = entry.suffix.lower()
         recording_id = _recording_id_for(entry.name)
-        recordings.append(
-            RecordingInfo(
-                recording_id=recording_id,
-                display_filename=f"{recording_id}{extension}",
-                extension=extension,
-                size_bytes=entry.stat().st_size,
-                duration_seconds=_duration_seconds(entry),
+        staged.append(
+            (
+                recording_id,
+                extension,
+                entry.stat().st_size,
+                _duration_seconds(entry),
+                _speaker_prefix_for(entry.name),
             )
         )
 
     # Sort by opaque id rather than original filename so list order never
     # mirrors the speaker grouping encoded in the real filenames.
-    recordings.sort(key=lambda recording: recording.recording_id)
+    staged.sort(key=lambda item: item[0])
+
+    # Assign anonymous speaker-group ids in strict first-appearance order
+    # over the now-sorted (by opaque id) list -- mirrors
+    # `clustering.remap_labels_by_first_appearance`. Recordings whose
+    # filename has no parseable speaker prefix get `speaker_group_id = None`.
+    group_ids_by_prefix: dict[str, str] = {}
+    recordings: list[RecordingInfo] = []
+    for recording_id, extension, size_bytes, duration_seconds, prefix in staged:
+        speaker_group_id: str | None = None
+        if prefix is not None:
+            if prefix not in group_ids_by_prefix:
+                group_ids_by_prefix[prefix] = f"speaker-group-{len(group_ids_by_prefix) + 1}"
+            speaker_group_id = group_ids_by_prefix[prefix]
+
+        recordings.append(
+            RecordingInfo(
+                recording_id=recording_id,
+                display_filename=f"{recording_id}{extension}",
+                extension=extension,
+                size_bytes=size_bytes,
+                duration_seconds=duration_seconds,
+                speaker_group_id=speaker_group_id,
+            )
+        )
+
     return recordings
 
 
@@ -124,6 +173,30 @@ def list_recordings() -> list[RecordingInfo]:
     """List every recording in the demo dataset. Raises if unavailable."""
 
     return _discover(_dataset_dir())
+
+
+def get_speaker_group_map() -> dict[str, str]:
+    """Map `recording_id -> speaker_group_id` for the whole demo dataset.
+
+    Recordings with no parseable speaker prefix are omitted, so
+    `mapping.get(recording_id)` returning `None` uniformly covers both "not a
+    demo recording id" and "demo recording with no parseable prefix" -- a
+    caller building a ground-truth list for a batch never needs to
+    distinguish the two. Never raises: if the dataset directory is
+    unavailable, returns an empty mapping so a batch made entirely of
+    non-demo (session-asset / custom-recording) ids is unaffected.
+    """
+
+    try:
+        recordings = list_recordings()
+    except DatasetUnavailable:
+        return {}
+
+    return {
+        recording.recording_id: recording.speaker_group_id
+        for recording in recordings
+        if recording.speaker_group_id is not None
+    }
 
 
 def get_recording(recording_id: str) -> RecordingInfo:

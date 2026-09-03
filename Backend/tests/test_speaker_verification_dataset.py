@@ -44,6 +44,20 @@ def fake_dataset_dir(monkeypatch, tmp_path):
     return _build_fake_dataset(tmp_path)
 
 
+def _build_dataset_with_filenames(root, filenames):
+    """Bare-bones fake dataset (no metadata.csv) for tests that need a
+    filename set FAKE_FILES can't provide -- e.g. a non-matching filename or
+    a specific opaque-id sort order. Kept separate from `_build_fake_dataset`
+    so the many tests relying on the fixed `FAKE_FILES` shape are unaffected.
+    """
+
+    dataset_dir = root / "vox_indian_demo_92"
+    dataset_dir.mkdir(parents=True)
+    for filename in filenames:
+        (dataset_dir / filename).write_bytes(b"RIFF-fake-audio")
+    return dataset_dir
+
+
 def _assert_no_ground_truth_leak(payload) -> None:
     serialized = json.dumps(payload)
     for filename, speaker in FAKE_FILES.items():
@@ -133,6 +147,92 @@ def test_get_recording_rejects_unknown_and_traversal_ids(fake_dataset_dir, bad_i
         dataset.get_recording(bad_id)
 
 
+def test_speaker_prefix_for_extracts_id_prefix():
+    assert dataset._speaker_prefix_for("id10018_01.wav") == "id10018"
+    assert dataset._speaker_prefix_for("id123_x.wav") == "id123"
+
+
+def test_speaker_prefix_for_returns_none_for_non_matching_filename():
+    assert dataset._speaker_prefix_for("upload-000.wav") is None
+    assert dataset._speaker_prefix_for("randomfile.mp3") is None
+    assert dataset._speaker_prefix_for("") is None
+
+
+def test_recordings_sharing_prefix_share_speaker_group_id(fake_dataset_dir):
+    recordings_by_id = {r.recording_id: r for r in dataset.list_recordings()}
+    group_for = lambda name: recordings_by_id[dataset._recording_id_for(name)].speaker_group_id
+
+    # FAKE_FILES: id10018_01.wav and id10018_02.wav share prefix id10018;
+    # id10324_01.wav has a different prefix.
+    assert group_for("id10018_01.wav") == group_for("id10018_02.wav")
+    assert group_for("id10018_01.wav") != group_for("id10324_01.wav")
+    assert group_for("id10018_01.wav") is not None
+    assert group_for("id10324_01.wav") is not None
+
+
+def test_speaker_group_assignment_is_deterministic(fake_dataset_dir):
+    first = {r.recording_id: r.speaker_group_id for r in dataset.list_recordings()}
+    second = {r.recording_id: r.speaker_group_id for r in dataset.list_recordings()}
+    assert first == second
+
+
+def test_discover_group_order_follows_recording_id_sort_not_filename_order(monkeypatch, tmp_path):
+    # Filenames chosen so alphabetical filename order (id100_a, id100_b,
+    # id200_a, id200_b) disagrees with opaque-recording-id sort order
+    # (id200_b, id100_a, id100_b, id200_a) -- verified by direct sha256
+    # computation. This proves group numbering follows the sorted-id order
+    # dataset._discover already uses, not filename order, so no filename
+    # ordering leaks into the anonymous group ids.
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+    filenames = ["id100_a.wav", "id100_b.wav", "id200_a.wav", "id200_b.wav"]
+    _build_dataset_with_filenames(tmp_path, filenames)
+
+    recording_ids_sorted = [r.recording_id for r in dataset.list_recordings()]
+    expected_sorted_names = ["id200_b.wav", "id100_a.wav", "id100_b.wav", "id200_a.wav"]
+    assert recording_ids_sorted == [dataset._recording_id_for(name) for name in expected_sorted_names]
+
+    recordings_by_id = {r.recording_id: r for r in dataset.list_recordings()}
+    group_for = lambda name: recordings_by_id[dataset._recording_id_for(name)].speaker_group_id
+
+    # id200 appears first in recording-id-sorted order (via id200_b) -> group 1.
+    # id100 appears second (via id100_a) -> group 2. Alphabetical filename
+    # order would have put id100 first -- this proves it doesn't.
+    assert group_for("id200_b.wav") == "speaker-group-1"
+    assert group_for("id200_a.wav") == "speaker-group-1"
+    assert group_for("id100_a.wav") == "speaker-group-2"
+    assert group_for("id100_b.wav") == "speaker-group-2"
+
+
+def test_discover_speaker_group_id_is_none_for_unparseable_prefix(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+    _build_dataset_with_filenames(tmp_path, ["id10018_01.wav", "upload-000.wav"])
+
+    recordings_by_id = {r.recording_id: r for r in dataset.list_recordings()}
+    valid_id = dataset._recording_id_for("id10018_01.wav")
+    stray_id = dataset._recording_id_for("upload-000.wav")
+
+    assert recordings_by_id[valid_id].speaker_group_id is not None
+    assert recordings_by_id[stray_id].speaker_group_id is None
+
+
+def test_get_speaker_group_map_omits_recordings_without_group(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+    _build_dataset_with_filenames(tmp_path, ["id10018_01.wav", "upload-000.wav"])
+
+    mapping = dataset.get_speaker_group_map()
+    valid_id = dataset._recording_id_for("id10018_01.wav")
+    stray_id = dataset._recording_id_for("upload-000.wav")
+
+    assert mapping.get(valid_id) is not None
+    assert mapping.get(stray_id) is None
+    assert mapping.get("rec_totally_unknown_id") is None
+
+
+def test_get_speaker_group_map_returns_empty_when_dataset_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
+    assert dataset.get_speaker_group_map() == {}
+
+
 def test_missing_dataset_directory_reports_unavailable(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "SPEAKER_VERIFICATION_DATASET_ROOT", tmp_path)
 
@@ -181,6 +281,26 @@ async def test_dataset_single_recording_endpoint(client, fake_dataset_dir):
 async def test_dataset_single_recording_endpoint_rejects_unknown_id(client, fake_dataset_dir):
     response = await client.get("/tasks/verification/dataset/recordings/not-a-real-id")
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_dataset_recordings_endpoint_never_exposes_speaker_group_id(client, fake_dataset_dir):
+    response = await client.get("/tasks/verification/dataset/recordings")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["recordings"]) == len(FAKE_FILES)
+    for recording in body["recordings"]:
+        assert "speaker_group_id" not in recording
+
+
+@pytest.mark.asyncio
+async def test_dataset_single_recording_endpoint_never_exposes_speaker_group_id(client, fake_dataset_dir):
+    listing = await client.get("/tasks/verification/dataset/recordings")
+    recording_id = listing.json()["recordings"][0]["recording_id"]
+
+    response = await client.get(f"/tasks/verification/dataset/recordings/{recording_id}")
+    assert response.status_code == 200
+    assert "speaker_group_id" not in response.json()
 
 
 @pytest.mark.asyncio

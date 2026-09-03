@@ -56,7 +56,8 @@ export const ClusterAssignmentResults = ({ selectedFile }: PredictionResultsProp
     );
   }
 
-  const { stats, clusterSize, modelLabel, clusteringDistanceThreshold } = snapshot;
+  const { stats, clusterSize, modelLabel, clusteringDistanceThreshold, groundTruthGroup, groundTruthAvailable } =
+    snapshot;
 
   return (
     <Card>
@@ -64,6 +65,13 @@ export const ClusterAssignmentResults = ({ selectedFile }: PredictionResultsProp
       <CardContent className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
         <span className="text-muted-foreground">Predicted cluster</span>
         <Badge variant="secondary" className="w-fit">{stats.cluster_id}</Badge>
+
+        <span className="text-muted-foreground">Ground-truth speaker group</span>
+        {groundTruthAvailable && groundTruthGroup !== null ? (
+          <Badge variant="secondary" className="w-fit">{groundTruthGroup}</Badge>
+        ) : (
+          <span className="text-muted-foreground italic">Ground-truth evaluation unavailable for this batch.</span>
+        )}
 
         <span className="text-muted-foreground">Cluster size</span>
         <span>{clusterSize} recording{clusterSize === 1 ? "" : "s"}</span>

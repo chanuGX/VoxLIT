@@ -163,6 +163,8 @@ export const BatchAnalysisPanel = ({
       modelLabel: batchResult.model_label,
       clusteringDistanceThreshold: batchResult.clustering_distance_threshold,
       clusteringThresholdVersion: batchResult.clustering_threshold_version,
+      groundTruthGroup: batchResult.ground_truth_groups?.[index] ?? null,
+      groundTruthAvailable: batchResult.ground_truth_available,
     });
   }, [batchResult, selectedFile, submittedIds]);
 
