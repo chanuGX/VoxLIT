@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useEmbedding } from "@/contexts/EmbeddingContext";
 import { VERIFICATION_DEMO_DATASET_ID } from "@/tasks/registry";
 import type { UploadedFile } from "@/tasks/types";
+import { ClusterEvaluationMetricsCard } from "./ClusterEvaluationMetricsCard";
 import { ClusterSummaryList } from "./ClusterSummaryList";
 import { PairComparisonCard } from "./PairComparisonCard";
 import { buildClusterColorMap } from "./clusterColors";
@@ -548,6 +549,12 @@ export const BatchAnalysisPanel = ({
             clusterColorMap={clusterColorMap}
             focusedClusterId={focusedClusterId}
             onClusterFocusChange={setFocusedClusterId}
+          />
+          <ClusterEvaluationMetricsCard
+            evaluationMetrics={batchResult.evaluation_metrics}
+            groundTruthAvailable={batchResult.ground_truth_available}
+            predictedClusterCount={batchResult.cluster_count}
+            trueSpeakerCount={batchResult.true_speaker_count}
           />
         </>
       )}

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 import torchaudio
 
 from app.core.settings import settings
-from app.tasks.verification import clustering
+from app.tasks.verification import clustering, evaluation_metrics
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +359,19 @@ def assemble_batch_analysis(
     decisions = pairwise_decision_matrix(similarity, spec.threshold)
     cluster_result = clustering.cluster_batch(model_key, similarity, labels)
 
+    # Reporting-only: this reads the clustering result that has already been
+    # produced above and never feeds back into clustering, similarity, or
+    # decisions (SV-FR-25/34 must never influence prediction).
+    if ground_truth_groups is not None:
+        metrics = evaluation_metrics.evaluate_predicted_clusters(
+            cluster_result["cluster_labels"], ground_truth_groups
+        )
+        evaluation_metrics_payload: dict[str, object] | None = asdict(metrics)
+        true_speaker_count: int | None = len(set(ground_truth_groups))
+    else:
+        evaluation_metrics_payload = None
+        true_speaker_count = None
+
     return {
         "model": spec.key,
         "model_label": spec.label,
@@ -372,6 +385,8 @@ def assemble_batch_analysis(
         **cluster_result,
         "ground_truth_groups": list(ground_truth_groups) if ground_truth_groups is not None else None,
         "ground_truth_available": ground_truth_groups is not None,
+        "evaluation_metrics": evaluation_metrics_payload,
+        "true_speaker_count": true_speaker_count,
     }
 
 

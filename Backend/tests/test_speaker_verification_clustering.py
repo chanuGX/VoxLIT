@@ -475,6 +475,11 @@ def test_ground_truth_groups_do_not_affect_clustering_or_similarity(monkeypatch)
         "speaker-group-2",
     ]
 
+    assert without_ground_truth["evaluation_metrics"] is None
+    assert without_ground_truth["true_speaker_count"] is None
+    assert with_ground_truth["evaluation_metrics"] is not None
+    assert with_ground_truth["true_speaker_count"] == 2
+
 
 @pytest.mark.asyncio
 async def test_batch_upload_endpoint_response_includes_clustering_fields(client):

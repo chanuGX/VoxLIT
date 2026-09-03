@@ -22,6 +22,21 @@ export interface RecordingClusterStats {
   nearest_in_same_cluster: boolean;
 }
 
+export interface EvaluationMetrics {
+  adjusted_rand_index: number;
+  normalized_mutual_information: number;
+  cluster_purity: number;
+  total_unique_pairs: number;
+  true_positive_pairs: number;
+  true_negative_pairs: number;
+  false_positive_pairs: number;
+  false_negative_pairs: number;
+  pairwise_accuracy: number;
+  pairwise_precision: number;
+  pairwise_recall: number;
+  pairwise_f1_score: number;
+}
+
 export interface BatchAnalysisResponse {
   model: string;
   model_label: string;
@@ -41,6 +56,8 @@ export interface BatchAnalysisResponse {
   cluster_count: number;
   cluster_summaries: ClusterSummary[];
   recording_cluster_stats: RecordingClusterStats[];
+  evaluation_metrics: EvaluationMetrics | null;
+  true_speaker_count: number | null;
 }
 
 export interface BatchProjectionRequestBody {
